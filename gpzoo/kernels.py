@@ -6,12 +6,13 @@ from abc import ABC, abstractmethod
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 class Kernel(ABC):
-  def __init__(self, X: torch.Tensor = None, variance=None, lengthscale = None) -> None:
+  def __init__(self, X: torch.Tensor = None, variance=None, lengthscale = None, L = None) -> None:
     self.sigma = torch.rand((1,1), dtype=torch.float, device=device, requires_grad= True) if variance is None else torch.tensor([variance**0.5], device=device, requires_grad=True, dtype=torch.float)
     self.lengthscale = torch.rand((1,1), dtype=torch.float, device=device, requires_grad= True) if lengthscale is None else torch.tensor([lengthscale], device=device, requires_grad=True, dtype=torch.float)
     self.X = X
     self.distance = self.build_distance_mat(self.X, self.X) if self.X else None
     self.parameters = [self.sigma, self.lengthscale]
+    self.L = L # Only for NSF_RBF kernel
   
   def build_distance_mat(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
         return cdist(X, Y, p=self.norm)
@@ -51,15 +52,33 @@ class Kernel(ABC):
         distance = self.build_distance_mat(X, X) if Y is None else self.build_distance_mat(X, Y)
 
     return self.build_kernel(distance)
+    
+  def __call__(self, X : np.ndarray = None):
+    if self.X is None:
+        self.X = X
+        self.distance = self.build_distance_mat(self.X, self.X)
+    return self.predict()
 
 class RBF(Kernel):
   def __init__(self, X: torch.Tensor = None, variance = None, lengthscale = None):
     super(RBF, self).__init__(X, variance, lengthscale)
     self.p = 2
 
-    @property
-    def norm(self):
-      return self.p
+  @property
+  def norm(self):
+    return self.p
 
-    def build_kernel(self, distance: torch.Tensor) -> torch.Tensor:
-        return (self.sigma**2) * torch.exp(-0.5 * (distance/self.lengthscale)**2)
+  def build_kernel(self, distance: torch.Tensor) -> torch.Tensor:
+      return (self.sigma**2) * torch.exp(-0.5 * (distance/self.lengthscale)**2)
+
+class NSF_RBF(Kernel):
+  def __init__(self, X: torch.Tensor = None, variance = None, lengthscale = None, L = None):
+    super(NSF_RBF, self).__init__(X, variance, lengthscale, L)
+    self.p = 2
+
+  @property
+  def norm(self):
+    return self.p
+    
+  def build_kernel(self, distance: torch.Tensor) -> torch.Tensor:
+    return self.sigma**2 * torch.exp(-0.5*(distance/self.lengthscale)**2)
