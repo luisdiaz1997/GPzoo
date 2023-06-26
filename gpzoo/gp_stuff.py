@@ -153,7 +153,7 @@ class NSF(nn.Module):
         pY = distributions.Poisson(torch.abs(self.V)*Z)
 
 
-        
+
         return pY, qF, qU, pU
 
 
