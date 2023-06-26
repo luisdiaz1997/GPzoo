@@ -4,7 +4,7 @@ from torch import distributions
 import torch.nn as nn
 import tqdm
 import kernels
-import utilities
+from utilities import Utilities
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -33,7 +33,7 @@ class SVGP(nn.Module):
 
     if verbose:
       print('calculating cholesky')
-    L = torch.cholesky(utilities.add_jitter(Kzz, self.jitter))
+    L = torch.cholesky(Utilities.add_jitter(Kzz, self.jitter))
    
     if verbose:
         print('calculating W')
@@ -55,10 +55,10 @@ class SVGP(nn.Module):
 
     cov_diag = Kxx + torch.diagonal( W@ (S-Kzz)@ torch.transpose(W, -2, -1), dim1=-2, dim2=-1)
     qF = distributions.Normal(mean, cov_diag ** 0.5)
-    qU = distributions.MultivariateNormal(self.mu, scale_tril=torch.cholesky(utilities.add_jitter(S, self.jitter)))
+    qU = distributions.MultivariateNormal(self.mu, scale_tril=torch.cholesky(Utilities.add_jitter(S, self.jitter)))
     pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
 
-    return qF, qU, 
+    return qF, qU, pU
   
   def fit(self, X, y, optimizer, lr=0.005, epochs=1000, E=20):
     losses = []
@@ -90,7 +90,7 @@ class NSF(nn.Module):
       self.V = nn.Parameter(torch.ones((N,)))
 
 
-    def forward(self, E=10, verbose=False):
+    def forward(self, X, E=10, verbose=False):
       qF, qU, pU = self.svgp(X, verbose)
         
       F = qF.rsample((E,)) #shape ExLxN
@@ -109,7 +109,7 @@ class NSF(nn.Module):
   
     def fit(self, X, y, optimizer, lr=0.005, epochs=1000, E=20):
       losses = []
-      for it in tqdm(range(epochs)):
+      for it in tqdm.tqdm(range(epochs)):
           optimizer.zero_grad()
           pY, qF, qU, pU = self.forward(X, E=E)
           ELBO = (pY.log_prob(y)).mean(axis=0).sum()
