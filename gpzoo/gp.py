@@ -9,13 +9,10 @@ import utilities
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 class SVGP(nn.Module):
-  def __init__(self, X, y, kernel, dim=1, M=50, jitter=1e-4):
+  def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
     super().__init__()
-
     self.kernel = kernel
     self.jitter = jitter
-    self.y = y
-    self.X = X
         
     self.Z = nn.Parameter(torch.randn((M, dim))) #choose inducing points
     self.Lu = nn.Parameter(torch.randn((M, M)))
@@ -63,12 +60,12 @@ class SVGP(nn.Module):
 
     return qF, qU, 
   
-  def fit(self, optimizer, lr=0.005, epochs=1000, E=20):
+  def fit(self, X, y, optimizer, lr=0.005, epochs=1000, E=20):
     losses = []
     for it in tqdm(range(epochs)):
         optimizer.zero_grad()
-        pY, qF, qU, pU = self.forward(self.X, E=E)
-        ELBO = (pY.log_prob(self.y)).mean(axis=0).sum()
+        pY, qF, qU, pU = self.forward(X, E=E)
+        ELBO = (pY.log_prob(y)).mean(axis=0).sum()
         ELBO -= torch.sum(distributions.kl_divergence(qU, pU))
         loss = -ELBO
         loss.backward()
@@ -93,7 +90,7 @@ class NSF(nn.Module):
       self.V = nn.Parameter(torch.ones((N,)))
 
 
-    def forward(self, X, E=10, verbose=False):
+    def forward(self, E=10, verbose=False):
       qF, qU, pU = self.svgp(X, verbose)
         
       F = qF.rsample((E,)) #shape ExLxN
@@ -107,5 +104,21 @@ class NSF(nn.Module):
       Z = torch.matmul(torch.abs(self.W), F) #shape ExDxN
         
       pY = distributions.Poisson(torch.abs(self.V)*Z)
-      
+
       return pY, qF, qU, pU
+  
+    def fit(self, X, y, optimizer, lr=0.005, epochs=1000, E=20):
+      losses = []
+      for it in tqdm(range(epochs)):
+          optimizer.zero_grad()
+          pY, qF, qU, pU = self.forward(X, E=E)
+          ELBO = (pY.log_prob(y)).mean(axis=0).sum()
+          ELBO -= torch.sum(distributions.kl_divergence(qU, pU))
+          loss = -ELBO
+          loss.backward()
+          optimizer.step()
+          losses.append(loss.item())
+      
+      print("finished Training")
+
+      return losses
