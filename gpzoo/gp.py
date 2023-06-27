@@ -94,17 +94,11 @@ class NSF(nn.Module):
       qF, qU, pU = self.svgp(X, verbose)
         
       F = qF.rsample((E,)) #shape ExLxN
-
       # F = 255*torch.softmax(F, dim=2)
-
       F = torch.exp(F)
-
       #F = torch.transpose(F, -2, -1)
-
       Z = torch.matmul(torch.abs(self.W), F) #shape ExDxN
-        
       pY = distributions.Poisson(torch.abs(self.V)*Z)
-
       return pY, qF, qU, pU
   
     def fit(self, X, y, optimizer, lr=0.005, epochs=1000, E=20):
