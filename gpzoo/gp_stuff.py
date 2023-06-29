@@ -1,5 +1,6 @@
 import torch
 from torch import distributions, nn
+from torch.distributions import constraints, transform_to
 
 #to be organized
 
@@ -62,6 +63,7 @@ class SVGP(nn.Module):
         self.Z = nn.Parameter(torch.randn((M, dim))) #choose inducing points
         self.Lu = nn.Parameter(torch.randn((M, M)))
         self.mu = nn.Parameter(torch.zeros((M,)))
+        self.constraint = constraints.lower_cholesky
 
     def forward(self, X, verbose=False):
 
@@ -82,7 +84,7 @@ class SVGP(nn.Module):
 
         if verbose:
             print('calculating cholesky')
-        L = torch.cholesky(add_jitter(Kzz, self.jitter))
+        L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter))
 
         if verbose:
             print('calculating W')
@@ -93,7 +95,11 @@ class SVGP(nn.Module):
         W = torch.transpose(W, -2, -1)# Kxz@(Kzz)-1
         
         
-        S = torch.transpose(self.Lu, -2, -1) @ self.Lu
+
+        Lu = transform_to(self.constraint)(self.Lu)
+
+
+        S = Lu @ torch.transpose(Lu, -2, -1)
         
         if verbose:
             print('calculating predictive mean')
@@ -104,12 +110,13 @@ class SVGP(nn.Module):
         if verbose:
             print('calculating predictive covariance')
 
-        cov_diag = Kxx + torch.diagonal( W@ (S-Kzz)@ torch.transpose(W, -2, -1), dim1=-2, dim2=-1)
+
+        cov_diag = Kxx + torch.sum((W@ (S-Kzz))* W, dim=-1)
 
 
         qF = distributions.Normal(mean, cov_diag ** 0.5)
 
-        qU = distributions.MultivariateNormal(self.mu, scale_tril=torch.cholesky(add_jitter(S, self.jitter)))
+        qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
 
         pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
 
@@ -141,15 +148,10 @@ class NSF(nn.Module):
         
         F = qF.rsample((E,)) #shape ExLxN
 
-        # F = 255*torch.softmax(F, dim=2)
-
         F = torch.exp(F)
-
-        #F = torch.transpose(F, -2, -1)
 
         Z = torch.matmul(torch.abs(self.W), F) #shape ExDxN
         
-
         pY = distributions.Poisson(torch.abs(self.V)*Z)
 
 
