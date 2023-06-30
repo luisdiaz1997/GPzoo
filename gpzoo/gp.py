@@ -55,7 +55,7 @@ class SVGP(nn.Module):
     if verbose:
         print('calculating predictive covariance')
 
-    cov_diag = Kxx + torch.sum((W@ (S-Kzz))* W, dim=-1)
+    cov_diag = Kxx + torch.sum((torch.bmm(W, S-Kzz))* W, dim=-1)
     qF = distributions.Normal(mean, cov_diag ** 0.5)
     qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
     pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
