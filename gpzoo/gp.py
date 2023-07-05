@@ -55,7 +55,9 @@ class SVGP(nn.Module):
     if verbose:
         print('calculating predictive covariance')
 
-    cov_diag = Kxx + torch.sum((torch.bmm(W, S-Kzz))* W, dim=-1)
+
+    diff = S-Kzz
+    cov_diag = Kxx + torch.sum((W @ diff)* W, dim=-1)
     qF = distributions.Normal(mean, cov_diag ** 0.5)
     qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
     pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
@@ -91,6 +93,18 @@ class NSF(nn.Module):
 
       self.V = nn.Parameter(torch.ones((N,)))
 
+    
+    #experimental batched forward
+    def batched_forward(self, X, idx, E=10, verbose=False):
+      qF, qU, pU = self.svgp(X, verbose)
+      F = qF.rsample((E,)) #shape ExLxN
+      F = torch.exp(F)
+
+      W = self.W[idx]
+
+      Z = torch.matmul(torch.abs(W), F) #shape ExDxN
+      pY = distributions.Poisson(torch.abs(self.V)*Z)
+      return pY, qF, qU, pU
 
     def forward(self, X, E=10, verbose=False):
       qF, qU, pU = self.svgp(X, verbose)
