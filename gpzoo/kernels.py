@@ -71,7 +71,7 @@ class MGGP_RBF(RBF):
 
     distance_squared = distance_squared/(self.lengthscale**2)
 
-    return self.variance * torch.exp(-0.5 * distance_squared/ (self.group_diff_param * group_r2 + 1)) * scale
+    return self.sigma**2 * torch.exp(-0.5 * distance_squared/ (self.group_diff_param * group_r2 + 1)) * scale
 
 
 
@@ -108,4 +108,4 @@ class MGGP_NSF_RBF(NSF_RBF):
 
     distance_squared = distance_squared/(self.lengthscale**2)
 
-    return self.variance * torch.exp(-0.5 * distance_squared/ (self.group_diff_param * group_r2 + 1)) * scale
+    return self.sigma**2 * torch.exp(-0.5 * distance_squared/ (self.group_diff_param * group_r2 + 1)) * scale
