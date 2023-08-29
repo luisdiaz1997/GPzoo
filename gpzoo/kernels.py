@@ -43,13 +43,13 @@ class NSF_RBF(nn.Module):
   
 
 class MGGP_RBF(RBF):
-  def __init__(self, sigma=1.0, lengthscale=2.0, group_diff_param=1.0, n_groups=2):
+  def __init__(self, sigma=1.0, lengthscale=2.0, group_diff_param=1.0, n_groups=2, device='cpu'):
     super().__init__(sigma, lengthscale)
 
     self.group_diff_param = nn.Parameter(torch.tensor(group_diff_param))
 
     group_distances = torch.ones(n_groups) - torch.eye(n_groups)
-    self.embedding = _embed_distance_matrix(group_distances)
+    self.embedding = _embed_distance_matrix(group_distances).to(device)
 
 
   def forward(self, X, Z, groupsX, groupsZ, diag=False):
@@ -77,13 +77,13 @@ class MGGP_RBF(RBF):
 
 
 class MGGP_NSF_RBF(NSF_RBF):
-  def __init__(self, sigma=1.0, lengthscale=2.0, group_diff_param=1.0, n_groups=2, L=10):
+  def __init__(self, sigma=1.0, lengthscale=2.0, group_diff_param=1.0, n_groups=2, L=10, device='cpu'):
     super().__init__(sigma, lengthscale, L)
 
     self.group_diff_param = nn.Parameter(group_diff_param*torch.ones((L, 1, 1)))
 
     group_distances = torch.ones(n_groups) - torch.eye(n_groups)
-    self.embedding = _embed_distance_matrix(group_distances)
+    self.embedding = _embed_distance_matrix(group_distances).to(device)
 
 
   def forward(self, X, Z, groupsX, groupsZ, diag=False):
@@ -104,8 +104,8 @@ class MGGP_NSF_RBF(NSF_RBF):
     assert distance_squared.shape == group_r2.shape
 
 
-    scale = 1 / (self.group_diff_param * group_r2 + 1)**(0.5*self.input_dim)
+    scale = 1 / (torch.abs(self.group_diff_param) * group_r2 + 1)**(0.5*self.input_dim)
 
     distance_squared = distance_squared/(self.lengthscale**2)
 
-    return self.sigma**2 * torch.exp(-0.5 * distance_squared/ (self.group_diff_param * group_r2 + 1)) * scale
+    return self.sigma**2 * torch.exp(-0.5 * distance_squared/ (torch.abs(self.group_diff_param) * group_r2 + 1)) * scale

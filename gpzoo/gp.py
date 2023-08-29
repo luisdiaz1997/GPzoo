@@ -1,5 +1,4 @@
 import torch
-import numpy as np
 from torch import distributions
 from torch.distributions import constraints, transform_to
 import torch.nn as nn
@@ -132,7 +131,7 @@ class MGGP_SVGP(nn.Module):
 
     diff = S-Kzz
     cov_diag = Kxx + torch.sum((W @ diff)* W, dim=-1)
-    qF = distributions.Normal(mean, cov_diag ** 0.5)
+    qF = distributions.Normal(mean, torch.clamp(cov_diag, min=1e-2) ** 0.5)
     qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
     pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
 
@@ -206,3 +205,41 @@ class NSF(nn.Module):
       print("finished Training")
 
       return losses
+    
+
+class MGGP_NSF(nn.Module):
+    def __init__(self, X, y, kernel, M=50, L=10, jitter=1e-4, n_groups=2):
+      super().__init__()
+      D, N = y.shape
+      self.kernel = kernel
+      self.svgp = MGGP_SVGP(self.kernel, dim=2, M=M, jitter=jitter, n_groups=n_groups)
+      self.svgp.Lu = nn.Parameter(5e-2*torch.rand((L, n_groups*M, n_groups*M)))
+      self.svgp.mu = nn.Parameter(torch.zeros((L, n_groups*M)))
+
+      self.W = nn.Parameter(torch.rand((D, L)))
+
+      self.V = nn.Parameter(torch.ones((N,)))
+
+    
+    # #experimental batched forward
+    # def batched_forward(self, X, idx, E=10, verbose=False):
+    #   qF, qU, pU = self.svgp(X, verbose)
+    #   F = qF.rsample((E,)) #shape ExLxN
+    #   F = torch.exp(F)
+
+    #   W = self.W[idx]
+
+    #   Z = torch.matmul(torch.abs(W), F) #shape ExDxN
+    #   pY = distributions.Poisson(torch.abs(self.V)*Z)
+    #   return pY, qF, qU, pU
+
+    def forward(self, X, groupsX, E=10, verbose=False):
+      qF, qU, pU = self.svgp(X, groupsX, verbose)
+        
+      F = qF.rsample((E,)) #shape ExLxN
+      # F = 255*torch.softmax(F, dim=2)
+      F = torch.exp(F)
+      #F = torch.transpose(F, -2, -1)
+      Z = torch.matmul(torch.abs(self.W), F) #shape ExDxN
+      pY = distributions.Poisson(torch.abs(self.V)*Z)
+      return pY, qF, qU, pU
