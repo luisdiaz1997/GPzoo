@@ -3,7 +3,6 @@ import torch.nn as nn
 
 from .utilities import _squared_dist, _torch_sqrt, _embed_distance_matrix
 
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 class RBF(nn.Module):
   def __init__(self, sigma=1.0, lengthscale=2.0):
@@ -83,7 +82,7 @@ class MGGP_NSF_RBF(NSF_RBF):
     self.group_diff_param = nn.Parameter(group_diff_param*torch.ones((L, 1, 1)))
 
     group_distances = torch.ones(n_groups) - torch.eye(n_groups)
-    self.embedding = _embed_distance_matrix(group_distances).to(device)
+    self.embedding = nn.Parameter(_embed_distance_matrix(group_distances), requires_grad=False)
 
 
   def forward(self, X, Z, groupsX, groupsZ, diag=False):
