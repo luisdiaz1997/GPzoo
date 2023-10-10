@@ -1,6 +1,9 @@
 import torch
 from tqdm.autonotebook import tqdm
 from torch import distributions
+from functools import partial
+from torch.nn.utils import clip_grad_norm_
+
 
 def _squared_dist(X, Z):
     
@@ -68,6 +71,36 @@ def train(model, optimizer, X, groupsX, y, device, steps=200, E=20):
     return losses
 
 
+def train_closure_batched(model, optimizer, X, groupsX, y, device, steps=200, E=20, batch_size=1000):
+    losses = []
+
+    
+    def closure(idx):
+        optimizer.zero_grad()
+        pY, _ , qU, pU = model.forward_batched(X, groupsX, idx, E=E)
+        logpY = pY.log_prob(y[:, idx])
+        ELBO = (logpY).mean(axis=0).sum()
+        ELBO -= torch.sum(distributions.kl_divergence(qU, pU))
+        loss = -ELBO
+        loss.backward()
+        losses.append(loss.item())
+        # clip_grad_norm_(model.parameters(), 1.0)
+        return loss
+    
+    
+    for it in tqdm(range(steps)):
+
+        idx = torch.multinomial(torch.ones(X.shape[0]), num_samples=batch_size, replacement=False)
+
+        optimizer.step(partial(closure, idx))
+
+
+    with torch.no_grad():
+        if device.type=='cuda':
+            torch.cuda.empty_cache()
+
+    return losses
+
 
 
 def train_batched(model, optimizer, X, groupsX, y, device, steps=200, E=20, batch_size=1000):
@@ -81,8 +114,10 @@ def train_batched(model, optimizer, X, groupsX, y, device, steps=200, E=20, batc
         optimizer.zero_grad()
         pY, _ , qU, pU = model.forward_batched(X, groupsX, idx, E=E)
 
+        logpY = pY.log_prob(y[:, idx])
+        # print(logpY.shape)
 
-        ELBO = (pY.log_prob(y[:, idx])).mean(axis=0).sum()
+        ELBO = (logpY).mean(axis=0).sum()
 
         ELBO -= torch.sum(distributions.kl_divergence(qU, pU))
 

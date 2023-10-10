@@ -130,7 +130,7 @@ class MGGP_SVGP(nn.Module):
 
     diff = S-Kzz
     cov_diag = Kxx + torch.sum((W @ diff)* W, dim=-1)
-    qF = distributions.Normal(mean, torch.clamp(cov_diag, min=5e-2) ** 0.5)
+    qF = distributions.Normal(mean, torch.clamp(cov_diag, min=5e-2) ** 0.5) #setting max cov_diag to 100, need to find a way to clip values manually later
     qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
     pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
 
@@ -171,22 +171,6 @@ class NSF(nn.Module):
       Z = torch.matmul(torch.abs(self.W), F) #shape ExDxN
       pY = distributions.Poisson(torch.abs(self.V)*Z)
       return pY, qF, qU, pU
-  
-    def fit(self, X, y, optimizer, lr=0.005, epochs=1000, E=20):
-      losses = []
-      for it in tqdm.tqdm(range(epochs)):
-          optimizer.zero_grad()
-          pY, qF, qU, pU = self.forward(X, E=E)
-          ELBO = (pY.log_prob(y)).mean(axis=0).sum()
-          ELBO -= torch.sum(distributions.kl_divergence(qU, pU))
-          loss = -ELBO
-          loss.backward()
-          optimizer.step()
-          losses.append(loss.item())
-      
-      print("finished Training")
-
-      return losses
     
 
 class MGGP_NSF(nn.Module):
@@ -194,8 +178,8 @@ class MGGP_NSF(nn.Module):
       super().__init__()
       D, N = y.shape
       self.svgp = MGGP_SVGP(kernel, dim=2, M=M, jitter=jitter, n_groups=n_groups)
-      self.svgp.Lu = nn.Parameter(5e-2*torch.rand((L, n_groups*M, n_groups*M)))
-      self.svgp.mu = nn.Parameter(torch.zeros((L, n_groups*M)))
+      self.svgp.Lu = nn.Parameter(5e-1*torch.rand((L, n_groups*M, n_groups*M)))
+      self.svgp.mu = nn.Parameter(torch.randn((L, n_groups*M)))
 
       self.W = nn.Parameter(torch.rand((D, L)))
 
