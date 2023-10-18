@@ -55,6 +55,26 @@ class VNNGP(nn.Module):
     mean = torch.zeros_like(Kxx)
     cov = torch.zeros_like(Kxx)
 
+
+    little_L = L[indexes]
+    little_Kzz = little_L @ torch.transpose(little_L, -2, -1)
+    kzz_inv = torch.inverse(add_jitter(little_Kzz, self.jitter)) #N x KxK
+
+    little_Kxz = torch.gather(torch.transpose(Kzx,-2, -1), 1, indexes)[:, None, :] #Nx1xK
+
+    W = torch.squeeze(little_Kxz  @ kzz_inv) # NxK
+    little_mu = self.mu[indexes] # NxK
+    mean = torch.sum(W * little_mu, dim=1)
+    
+    little_Lu = Lu[indexes] # N x K x M
+
+    little_S = little_Lu @ torch.transpose(little_Lu, -2, -1) # N x KxK
+
+    diff = little_Kzz - little_S # NxKxK
+
+    cov = Kxx - torch.einsum('ijk,ij,ik->i', diff, W, W)
+
+
     def one_run(index):
       little_Kzz = (Kzz[indexes[index]])[:, indexes[index]]
       kzz_inv = torch.inverse(add_jitter(little_Kzz, self.jitter))
@@ -73,11 +93,11 @@ class VNNGP(nn.Module):
       little_Lu = Lu[indexes[index]]
       S = little_Lu @ torch.transpose(little_Lu, -2, -1)
       cov[index] = Kxx[index] - torch.squeeze(W @ (little_Kzz-S) @ torch.transpose(W, -2, -1))
-      
 
 
-    for i in range(N):
-      one_run(i)
+
+    # for i in range(N):
+    #   one_run(i)
       
 
     qF = distributions.Normal(mean, torch.clamp(cov, min=5e-2) ** 0.5)
