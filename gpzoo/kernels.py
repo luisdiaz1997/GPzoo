@@ -12,14 +12,19 @@ class RBF(nn.Module):
     self.lengthscale = nn.Parameter(torch.tensor(lengthscale))
     self.input_dim = 2
     
-  def forward(self, X, Z, diag=True):
+  def forward(self, X, Z, diag=False, return_distance=False):
     if diag :
         return (self.sigma**2).expand(X.size(0))
     
+    distance = torch.cdist(X, Z)
+    distance_squared = distance ** 2
 
-    distance_squared = _squared_dist(X, Z)
-
-    return self.sigma**2 * torch.exp(-0.5*distance_squared/(self.lengthscale**2))
+    output = self.sigma**2 * torch.exp(-0.5*distance_squared/(self.lengthscale**2))
+    
+    if return_distance:
+      return output, distance
+    
+    return output
     
 
 class NSF_RBF(nn.Module):
