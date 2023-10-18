@@ -67,7 +67,6 @@ class VNNGP(nn.Module):
     mean = torch.sum(W * little_mu, dim=1)
     
     little_Lu = Lu[indexes] # N x K x M
-
     little_S = little_Lu @ torch.transpose(little_Lu, -2, -1) # N x KxK
 
     diff = little_Kzz - little_S # NxKxK
