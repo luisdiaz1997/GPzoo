@@ -6,8 +6,16 @@ from torch.nn.utils import clip_grad_norm_
 
 
 
-def svgp_forward(Kxx, Kzz, W, inducing_mean, inducing_cov):
+def svgp_forward(Kxx: torch.Tensor, Kzz: torch.Tensor, W: torch.Tensor, inducing_mean: torch.Tensor, inducing_cov: torch.Tensor)-> (torch.Tensor, torch.Tensor):
+    '''
+        Kxx: Tensor of shape (L x N)
+        Kzz: Tensor of shape (L x M x M)
+        W: Tensor of shape (L x N x M)
+        inducing_mean: Tensor of shape (L x M)
+        inducing_cov: Tensor of shape (L x M x M)
 
+        output: Tensor of shape (L x N x 1), Tensor of shape (L x N)
+    '''
     mean = W@ (inducing_mean.unsqueeze(-1))
     diff = inducing_cov-Kzz #shape L x M x M
     cov = Kxx + torch.sum((W @ diff)* W, dim=-1) #shape L x N

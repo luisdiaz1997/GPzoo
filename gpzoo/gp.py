@@ -34,46 +34,86 @@ class VNNGP(nn.Module):
   def forward(self, X, verbose=False):
 
 
-    Kxx = self.kernel(X, X, diag=True)[:, None]
+    Kxx = self.kernel(X, X, diag=True)
+    Kxx_shape = Kxx.shape
+    Kxx = Kxx.view(-1, 1) # (... x N) x 1
+
     if verbose:
       print('calculating Kxx')
       print('Kxx.shape', Kxx.shape)
     
 
-    Kzx, distances = self.kernel(self.Z, X, return_distance=True)
-    if verbose:
-      print('calculating Kzx')
-      print('Kzx.shape', Kzx.shape)
+    Kxz, distances = self.kernel(X, self.Z, return_distance=True)
 
+    Kxz_shape = Kxz.shape
+    Kxz = Kxz.view(-1, Kxz_shape[-1]) # (... x N) x M
+
+    if verbose:
+      print('calculating Kxz')
+      print('Kxz.shape', Kxz.shape)
 
     Kzz = self.kernel(self.Z, self.Z)
+
+    Kzz_shape = Kzz.shape
+    Kzz = Kzz.view(-1, Kzz_shape[-2], Kzz_shape[-1]) # ... x M x M
 
     if verbose:
       print('calculating kzz')
       print('Kzz.shape', Kzz.shape)
 
     Lu = transform_to(self.constraint)(self.Lu)
-
-    L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter))
-
-    indexes = torch.argsort(distances.T, dim=1)[:, :self.K]
+    Lu_shape = Lu.shape
+    Lu = Lu.view(-1, Lu_shape[-2], Lu_shape[-1]) # ... x M x M
 
 
-    little_L = L[indexes]
-    little_Kzz = little_L @ torch.transpose(little_L, -2, -1) # N x K x K
-    kzz_inv = torch.inverse(add_jitter(little_Kzz, self.jitter)) #N x KxK
-    little_Kxz = torch.gather(torch.transpose(Kzx,-2, -1), 1, indexes)[:, None, :] #Nx1xK
+    L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter)) # ... x M x M
+    L_shape = L.shape
+    L = L.view(-1, L_shape[-2], L_shape[-1]) # ... x M x M
 
-    W = little_Kxz  @ kzz_inv # Nx 1 x K
+    if verbose:
+      print('calculating L')
+      print('L.shape', L.shape)
+
+
+    indexes = torch.argsort(distances, dim=1)[:, :self.K]
+
+    little_L = L[:, indexes] # ... x N x K x M
+
+    if verbose:
+      print('Little_L.shape:', little_L.shape)
+
+
+
+    little_Kzz = little_L @ torch.transpose(little_L, -2, -1) # ... x N x K x K
+    little_Kzz_shape = little_Kzz.shape
+    little_Kzz = little_Kzz.view(-1, little_Kzz_shape[-2], little_Kzz_shape[-1]) # ( ... x N) x K x K
+
+
+    kzz_inv = torch.inverse(add_jitter(little_Kzz, self.jitter)) # (... x N) x KxK
+
+    little_Kxz = torch.gather(Kxz, 1, indexes.expand(Kxz.shape[0], -1))[:, None, :] #(... x N)x1xK
+
+    W = little_Kxz  @ kzz_inv # (... x N) x 1 x K
+
     if verbose:
       print('W_shape:', W.shape)
 
-    little_mu = self.mu[indexes] # N x K
+    mu_shape = self.mu.shape
+
+    mu = self.mu.view(-1, mu_shape[-1]) # ... x M
+
+    little_mu = mu[:, indexes]# ... x  N x K
+    little_mu = little_mu.view(-1, little_mu.shape[-1]) # (... x  N) x K
 
 
-    little_Lu = Lu[indexes] # N x K x M
-    little_S = little_Lu @ torch.transpose(little_Lu, -2, -1) # N x KxK
 
+    little_Lu = Lu[:, indexes] # ... x N x K x M
+    little_S = little_Lu @ torch.transpose(little_Lu, -2, -1) # ... x N x K x K
+    little_S = little_S.view(-1, little_S.shape[-2], little_S.shape[-1]) # (... x N) x K x K
+
+
+    if verbose:
+      print(Kxx.shape, little_Kzz.shape, W.shape, little_mu.shape, little_S.shape)
     mean, cov = svgp_forward(Kxx, little_Kzz, W, little_mu, little_S)
 
     if verbose:
@@ -82,6 +122,9 @@ class VNNGP(nn.Module):
 
     mean = torch.squeeze(mean)
     cov = torch.squeeze(cov)
+
+    mean = mean.view(*Kxx_shape)
+    cov = cov.view(*Kxx_shape)
 
 
     qF = distributions.Normal(mean, torch.clamp(cov, min=5e-2) ** 0.5)
@@ -176,18 +219,11 @@ class MGGP_SVGP(nn.Module):
     Lu = transform_to(self.constraint)(self.Lu)
     S = Lu @ torch.transpose(Lu, -2, -1)
     
-    if verbose:
-        print('calculating predictive mean')
-
-    mean = W@ (self.mu.unsqueeze(-1))
+    
+    mean, cov_diag = svgp_forward(Kxx, Kzz, W, self.mu, S)
     mean = torch.squeeze(mean)
 
-    if verbose:
-        print('calculating predictive covariance')
 
-
-    diff = S-Kzz
-    cov_diag = Kxx + torch.sum((W @ diff)* W, dim=-1)
     qF = distributions.Normal(mean, torch.clamp(cov_diag, min=5e-2) ** 0.5) #setting max cov_diag to 100, need to find a way to clip values manually later
     qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
     pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
