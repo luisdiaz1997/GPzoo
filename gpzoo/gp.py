@@ -3,7 +3,7 @@ from torch import distributions
 from torch.distributions import constraints, transform_to
 import torch.nn as nn
 import tqdm
-from .utilities import add_jitter
+from .utilities import add_jitter, svgp_forward
 
 class GaussianLikelihood(nn.Module):
   def __init__(self, gp):
@@ -32,72 +32,57 @@ class VNNGP(nn.Module):
     self.constraint = constraints.lower_cholesky
 
   def forward(self, X, verbose=False):
+
+
+    Kxx = self.kernel(X, X, diag=True)[:, None]
     if verbose:
       print('calculating Kxx')
-    Kxx = self.kernel(X, X, diag=True)
+      print('Kxx.shape', Kxx.shape)
+    
 
+    Kzx, distances = self.kernel(self.Z, X, return_distance=True)
     if verbose:
       print('calculating Kzx')
-    Kzx, distances = self.kernel(self.Z, X, return_distance=True)
+      print('Kzx.shape', Kzx.shape)
+
+
+    Kzz = self.kernel(self.Z, self.Z)
 
     if verbose:
       print('calculating kzz')
-    Kzz = self.kernel(self.Z, self.Z)
+      print('Kzz.shape', Kzz.shape)
+
     Lu = transform_to(self.constraint)(self.Lu)
 
     L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter))
 
     indexes = torch.argsort(distances.T, dim=1)[:, :self.K]
 
-    N = len(Kxx)
-
-
-    mean = torch.zeros_like(Kxx)
-    cov = torch.zeros_like(Kxx)
-
 
     little_L = L[indexes]
-    little_Kzz = little_L @ torch.transpose(little_L, -2, -1)
+    little_Kzz = little_L @ torch.transpose(little_L, -2, -1) # N x K x K
     kzz_inv = torch.inverse(add_jitter(little_Kzz, self.jitter)) #N x KxK
-
     little_Kxz = torch.gather(torch.transpose(Kzx,-2, -1), 1, indexes)[:, None, :] #Nx1xK
 
-    W = torch.squeeze(little_Kxz  @ kzz_inv) # NxK
-    little_mu = self.mu[indexes] # NxK
-    mean = torch.sum(W * little_mu, dim=1)
-    
+    W = little_Kxz  @ kzz_inv # Nx 1 x K
+    if verbose:
+      print('W_shape:', W.shape)
+
+    little_mu = self.mu[indexes] # N x K
+
+
     little_Lu = Lu[indexes] # N x K x M
     little_S = little_Lu @ torch.transpose(little_Lu, -2, -1) # N x KxK
 
-    diff = little_Kzz - little_S # NxKxK
+    mean, cov = svgp_forward(Kxx, little_Kzz, W, little_mu, little_S)
 
-    cov = Kxx - torch.einsum('ijk,ij,ik->i', diff, W, W)
+    if verbose:
+      print('mean.shape:', mean.shape)
+      print('cov.shape:', cov.shape)
 
+    mean = torch.squeeze(mean)
+    cov = torch.squeeze(cov)
 
-    def one_run(index):
-      little_Kzz = (Kzz[indexes[index]])[:, indexes[index]]
-      kzz_inv = torch.inverse(add_jitter(little_Kzz, self.jitter))
-
-      W = kzz_inv @ ((Kzx[indexes[index], index]).unsqueeze(-1))
-
-      W = torch.transpose(W, -2, -1) # 1x3 matrix, Kxz@(Kzz)-1
-
-      if verbose:
-        print('W.shape:', W.shape)
-
-      little_mu = self.mu[indexes[index]]
-
-      mean[index] = torch.squeeze(W @  little_mu.unsqueeze(-1))
-
-      little_Lu = Lu[indexes[index]]
-      S = little_Lu @ torch.transpose(little_Lu, -2, -1)
-      cov[index] = Kxx[index] - torch.squeeze(W @ (little_Kzz-S) @ torch.transpose(W, -2, -1))
-
-
-
-    # for i in range(N):
-    #   one_run(i)
-      
 
     qF = distributions.Normal(mean, torch.clamp(cov, min=5e-2) ** 0.5)
     qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
@@ -120,63 +105,36 @@ class SVGP(nn.Module):
   def forward(self, X, verbose=False):
     if verbose:
       print('calculating Kxx')
-    Kxx = self.kernel(X, X, diag=True)
+    Kxx = self.kernel(X, X, diag=True) #shape L x N
 
     if verbose:
       print('calculating Kzx')
-    Kzx = self.kernel(self.Z, X)
+    Kzx = self.kernel(self.Z, X) #shape L x M x N
 
     if verbose:
       print('calculating kzz')
-    Kzz = self.kernel(self.Z, self.Z)
+    Kzz = self.kernel(self.Z, self.Z) #shape L x M x M
 
     if verbose:
       print('calculating cholesky')
-    L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter))
+    L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter)) #shape L x M x M
    
     if verbose:
         print('calculating W')
    
     W = torch.cholesky_solve(Kzx, L) #(Kzz)-1 @ Kzx
-    # Kzz_inv = torch.cholesky_inverse(L)
-    # W = Kzz_inv @ Kzx
-    W = torch.transpose(W, -2, -1)# Kxz@(Kzz)-1
-    Lu = transform_to(self.constraint)(self.Lu)
-    S = Lu @ torch.transpose(Lu, -2, -1)
-    
-    if verbose:
-        print('calculating predictive mean')
+    W = torch.transpose(W, -2, -1) # Kxz@(Kzz)-1, shape # L x N x M
+    Lu = transform_to(self.constraint)(self.Lu) #shape L x M x M
+    S = Lu @ torch.transpose(Lu, -2, -1) # shape L x M x M
 
-    mean = W@ (self.mu.unsqueeze(-1))
+    mean, cov_diag = svgp_forward(Kxx, Kzz, W, self.mu, S)
     mean = torch.squeeze(mean)
-
-    if verbose:
-        print('calculating predictive covariance')
-
-
-    diff = S-Kzz
-    cov_diag = Kxx + torch.sum((W @ diff)* W, dim=-1)
+    
     qF = distributions.Normal(mean, torch.clamp(cov_diag, min=5e-2) ** 0.5)
     qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
     pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
 
     return qF, qU, pU
-  
-  def fit(self, X, y, optimizer, lr=0.005, epochs=1000, E=20):
-    losses = []
-    for it in tqdm(range(epochs)):
-        optimizer.zero_grad()
-        pY, qF, qU, pU = self.forward(X, E=E)
-        ELBO = (pY.log_prob(y)).mean(axis=0).sum()
-        ELBO -= torch.sum(distributions.kl_divergence(qU, pU))
-        loss = -ELBO
-        loss.backward()
-        optimizer.step()
-        losses.append(loss.item())
-    
-    print("finished Training")
-
-    return losses
 
 
 class MGGP_SVGP(nn.Module):
@@ -283,8 +241,12 @@ class MGGP_NSF(nn.Module):
       self.svgp.mu = nn.Parameter(torch.randn((L, n_groups*M)))
 
       
+      self.non_spatial_mean = nn.Parameter(torch.randn((L, N)))
+      self.non_spatial_scales = nn.Parameter(torch.rand((L, N)))
 
-      self.W = nn.Parameter(torch.rand((D, L)))
+      
+
+      self.W = nn.Parameter(torch.rand((D, L+self.non_spatial_factors)))
 
       self.V = nn.Parameter(torch.ones((N,)))
 

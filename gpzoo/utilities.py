@@ -5,6 +5,15 @@ from functools import partial
 from torch.nn.utils import clip_grad_norm_
 
 
+
+def svgp_forward(Kxx, Kzz, W, inducing_mean, inducing_cov):
+
+    mean = W@ (inducing_mean.unsqueeze(-1))
+    diff = inducing_cov-Kzz #shape L x M x M
+    cov = Kxx + torch.sum((W @ diff)* W, dim=-1) #shape L x N
+    
+    return mean, cov
+
 def _squared_dist(X, Z):
     
     X2 = (X**2).sum(1, keepdim=True)
