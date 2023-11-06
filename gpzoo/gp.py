@@ -16,9 +16,7 @@ class VNNGP(nn.Module):
     self.mu = nn.Parameter(torch.zeros((M,)))
     self.constraint = constraints.lower_cholesky
 
-  def forward(self, X, verbose=False):
-
-
+  def forward(self, X, verbose=False, exp=False):
     Kxx = self.kernel(X, X, diag=True)
     Kxx_shape = Kxx.shape
     Kxx = Kxx.view(-1, 1) # (... x N) x 1
@@ -27,9 +25,7 @@ class VNNGP(nn.Module):
       print('calculating Kxx')
       print('Kxx.shape', Kxx.shape)
     
-
     Kxz, distances = self.kernel(X, self.Z, return_distance=True)
-
     Kxz_shape = Kxz.shape
     Kxz = Kxz.view(-1, Kxz_shape[-1]) # (... x N) x M
 
@@ -38,7 +34,6 @@ class VNNGP(nn.Module):
       print('Kxz.shape', Kxz.shape)
 
     Kzz = self.kernel(self.Z, self.Z)
-
     Kzz_shape = Kzz.shape
     Kzz = Kzz.view(-1, Kzz_shape[-2], Kzz_shape[-1]) # ... x M x M
 
@@ -50,8 +45,13 @@ class VNNGP(nn.Module):
     Lu_shape = Lu.shape
     Lu = Lu.view(-1, Lu_shape[-2], Lu_shape[-1]) # ... x M x M
 
+    #L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter)) # ... x M x M
+    # matrix power instead of cholesky:
+    if (exp == True):
+      L = torch.matrix_power(add_jitter(Kzz, self.jitter), 0.5)
+    else:
+      L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter))
 
-    L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter)) # ... x M x M
     L_shape = L.shape
     L = L.view(-1, L_shape[-2], L_shape[-1]) # ... x M x M
 
@@ -59,20 +59,15 @@ class VNNGP(nn.Module):
       print('calculating L')
       print('L.shape', L.shape)
 
-
-    indexes = torch.argsort(distances, dim=1)[:, :self.K]
-
+    indexes = torch.argsort(distances, dim=1)[:, 1:self.K+1]
     little_L = L[:, indexes] # ... x N x K x M
 
     if verbose:
       print('Little_L.shape:', little_L.shape)
 
-
-
     little_Kzz = little_L @ torch.transpose(little_L, -2, -1) # ... x N x K x K
     little_Kzz_shape = little_Kzz.shape
     little_Kzz = little_Kzz.view(-1, little_Kzz_shape[-2], little_Kzz_shape[-1]) # ( ... x N) x K x K
-
 
     kzz_inv = torch.inverse(add_jitter(little_Kzz, self.jitter)) # (... x N) x KxK
 
@@ -90,12 +85,9 @@ class VNNGP(nn.Module):
     little_mu = mu[:, indexes]# ... x  N x K
     little_mu = little_mu.view(-1, little_mu.shape[-1]) # (... x  N) x K
 
-
-
     little_Lu = Lu[:, indexes] # ... x N x K x M
     little_S = little_Lu @ torch.transpose(little_Lu, -2, -1) # ... x N x K x K
     little_S = little_S.view(-1, little_S.shape[-2], little_S.shape[-1]) # (... x N) x K x K
-
 
     if verbose:
       print(Kxx.shape, little_Kzz.shape, W.shape, little_mu.shape, little_S.shape)
@@ -105,12 +97,11 @@ class VNNGP(nn.Module):
       print('mean.shape:', mean.shape)
       print('cov.shape:', cov.shape)
 
-    mean = torch.squeeze(mean)
-    cov = torch.squeeze(cov)
+    mean = torch.squeeze(mean).view(*Kxx_shape)
+    cov = torch.squeeze(cov).view(*Kxx_shape)
 
-    mean = mean.view(*Kxx_shape)
-    cov = cov.view(*Kxx_shape)
-
+    #mean = mean.view(*Kxx_shape)
+    #cov = cov.view(*Kxx_shape)
 
     qF = distributions.Normal(mean, torch.clamp(cov, min=5e-2) ** 0.5)
     qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
