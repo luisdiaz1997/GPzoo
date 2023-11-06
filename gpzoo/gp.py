@@ -2,7 +2,7 @@ import torch
 from torch import distributions
 from torch.distributions import constraints, transform_to
 import torch.nn as nn
-from .utilities import add_jitter, svgp_forward
+from .utilities import add_jitter, svgp_forward, reshape_param
 
 class VNNGP(nn.Module):
   def __init__(self, kernel, dim=1, M=50, K=3, jitter=1e-4):
@@ -119,13 +119,109 @@ class VNNGP(nn.Module):
     return qF, qU, pU
 
 
-class SVGP(nn.Module):
-  def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
+class SVGP2(nn.Module):
+  def __init__(self, X, kernel, dim=1, jitter=1e-4):
     super().__init__()
     self.kernel = kernel
     self.jitter = jitter
-        
-    self.Z = nn.Parameter(torch.randn((M, dim))) #choose inducing points
+    
+
+    M, d = X.shape
+    
+    self.S = nn.Parameter(torch.eye(M))
+    self.mu = nn.Parameter(torch.zeros((M,)))
+    self.constraint = constraints.positive_definite
+
+  def forward(self, X, idx, verbose=False):
+
+    Z = X[idx]
+    Kzz = self.kernel(Z, Z) #shape ... x M x M
+
+    if verbose:
+      print('calculating cholesky')
+    L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter)) #shape L x M x M
+
+    S = reshape_param(self.S)
+    S = S[:, :, idx]
+    S = S[:, idx]
+    S = transform_to(self.constraint)(S)
+    
+
+    mu = self.mu[None, None, :]
+    mu = reshape_param(mu)
+
+    mean = torch.squeeze(mu[:,:, idx])
+    S = torch.squeeze(S)
+    
+    qF = distributions.MultivariateNormal(mean, add_jitter(S, self.jitter))
+    pU = distributions.MultivariateNormal(torch.zeros_like(mean), scale_tril=L)
+
+    return qF, qF, pU
+  
+  def forward_test(self, X, idx, X_test, verbose=False):
+    if verbose:
+      print('calculating Kxx')
+    Kxx = self.kernel(X_test, X_test, diag=True) #shape L x N
+
+    if verbose:
+      print('calculating Kzx')
+
+    Z = X[idx]
+    Kzx = self.kernel(Z, X_test) #shape L x M x N
+
+    if verbose:
+      print('calculating kzz')
+
+    Kzz = self.kernel(Z, Z) #shape L x M x M
+
+    if verbose:
+      print('calculating cholesky')
+    L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter)) #shape L x M x M
+   
+    if verbose:
+        print('calculating W')
+   
+    W = torch.cholesky_solve(Kzx, L) #(Kzz)-1 @ Kzx
+    W = torch.transpose(W, -2, -1) # Kxz@(Kzz)-1, shape # L x N x M
+
+
+    S = reshape_param(self.S)
+    S = S[:, :, idx]
+    S = S[:, idx]
+    S = transform_to(self.constraint)(S)
+    
+
+    mu = self.mu[None, None, :]
+    mu = reshape_param(mu)
+    mu = torch.squeeze(mu[:,:, idx])
+
+
+    mean, cov_diag = svgp_forward(Kxx, Kzz, W, mu, S)
+    mean = torch.squeeze(mean)
+    cov_diag = torch.squeeze(cov_diag)
+    S = torch.squeeze(S)
+    
+    qF = distributions.Normal(mean, torch.clamp(cov_diag, min=5e-2) ** 0.5)
+    qU = distributions.MultivariateNormal(mu, S)
+    pU = distributions.MultivariateNormal(torch.zeros_like(mu), scale_tril=L)
+
+    return qF, qU, pU
+
+
+class SVGP(nn.Module):
+  def __init__(self, kernel, dim=1, M=50, jitter=1e-4, idx=None):
+    super().__init__()
+    self.kernel = kernel
+    self.jitter = jitter
+    
+    self.idx = None
+    self.Z = None
+
+    if idx is None:
+      self.Z = nn.Parameter(torch.randn((M, dim))) #choose random inducing points
+    else:
+      self.idx = nn.Parameter(idx.type(torch.LongTensor), requires_grad=False) #uses indexes of input instead
+    
     self.Lu = nn.Parameter(torch.randn((M, M)))
     self.mu = nn.Parameter(torch.zeros((M,)))
     self.constraint = constraints.lower_cholesky
@@ -141,7 +237,13 @@ class SVGP(nn.Module):
 
     if verbose:
       print('calculating kzz')
-    Kzz = self.kernel(self.Z, self.Z) #shape L x M x M
+
+    if self.idx is not None:
+      Kzx_shape = Kzx.shape
+      Kzz = (Kzx.view(-1, Kzx_shape[-1]))[:, self.idx]
+      Kzz = Kzz.view(*Kzx_shape[:-1], Kzx_shape[-2])
+    else:
+      Kzz = self.kernel(self.Z, self.Z) #shape L x M x M
 
     if verbose:
       print('calculating cholesky')
@@ -207,6 +309,7 @@ class MGGP_SVGP(nn.Module):
 
     mean, cov_diag = svgp_forward(Kxx, Kzz, W, self.mu, S)
     mean = torch.squeeze(mean)
+    cov_diag = torch.squeeze(cov_diag)
 
 
     qF = distributions.Normal(mean, torch.clamp(cov_diag, min=5e-2) ** 0.5) #setting max cov_diag to 100, need to find a way to clip values manually later
