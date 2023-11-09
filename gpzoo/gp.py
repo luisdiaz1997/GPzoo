@@ -209,39 +209,52 @@ class SVGP2(nn.Module):
 
 
 class SVGP(nn.Module):
-  def __init__(self, kernel, dim=1, M=50, jitter=1e-4, idx=None):
+  def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
     super().__init__()
     self.kernel = kernel
     self.jitter = jitter
     
-    self.idx = None
-    self.Z = None
-
-    if idx is None:
-      self.Z = nn.Parameter(torch.randn((M, dim))) #choose random inducing points
-    else:
-      self.idx = nn.Parameter(idx.type(torch.LongTensor), requires_grad=False) #uses indexes of input instead
-    
-    self.Lu = nn.Parameter(torch.randn((M, M)))
+    self.Z = nn.Parameter(torch.randn((M, dim))) #choose random inducing points
+   
+    self.precompute_distance = False
+    # self.S = nn.Parameter(torch.eye(M))
+    self.Lu = nn.Parameter(torch.randn((M,M)))
     self.mu = nn.Parameter(torch.zeros((M,)))
     self.constraint = constraints.lower_cholesky
+    # self.constraint = constraints.positive_definite
+
+  def precompute_distance(self, X, idz):
+
+    self.precompute_distance = True
+    self.Z = nn.Parameter(X[idz], requires_grad=False)
+    self.distance = nn.Parameter(torch.cdist(X, self.Z)) #shape N x M
+    self.idz = idz
+
 
   def forward(self, X, verbose=False):
+
     if verbose:
       print('calculating Kxx')
+
     Kxx = self.kernel(X, X, diag=True) #shape L x N
 
     if verbose:
       print('calculating Kzx')
-    Kzx = self.kernel(self.Z, X) #shape L x M x N
+
+    if self.precompute_distance:
+
+      Kzx = self.kernel.forward_distance(distance_squared=(self.distance.T)**2) #shape L x M x N
+    else:
+      Kzx = self.kernel(self.Z, X) #shape L x M x N
 
     if verbose:
       print('calculating kzz')
 
-    if self.idx is not None:
+    if self.precompute_distance:
+
       Kzx_shape = Kzx.shape
-      Kzz = (Kzx.view(-1, Kzx_shape[-1]))[:, self.idx]
-      Kzz = Kzz.view(*Kzx_shape[:-1], Kzx_shape[-2])
+      Kzz = (Kzx.view(-1, Kzx_shape[-2], Kzx_shape[-1]))[:, :, self.idz]
+      Kzz = torch.squeeze(Kzz)
     else:
       Kzz = self.kernel(self.Z, self.Z) #shape L x M x M
 
@@ -256,6 +269,8 @@ class SVGP(nn.Module):
     W = torch.transpose(W, -2, -1) # Kxz@(Kzz)-1, shape # L x N x M
     Lu = transform_to(self.constraint)(self.Lu) #shape L x M x M
     S = Lu @ torch.transpose(Lu, -2, -1) # shape L x M x M
+
+    # S = transform_to(self.constraint)(self.S)
 
     mean, cov_diag = svgp_forward(Kxx, Kzz, W, self.mu, S)
     mean = torch.squeeze(mean)

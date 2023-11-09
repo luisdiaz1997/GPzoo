@@ -99,7 +99,7 @@ class Hybrid_NSF(NSF):
       Z = torch.matmul(W, F) #shape ExDxN
       pY = distributions.Poisson(V*Z)
 
-      pF2 = distributions.Normal(torch.zeros_like(self.mF), (self.gp.kernel.sigma)*torch.ones_like(scaleF))
+      pF2 = distributions.Normal(torch.zeros_like(self.mF), torch.ones_like(scaleF))
 
       return pY, qF, qU, pU, qF2, pF2
     
@@ -129,7 +129,7 @@ class Hybrid_NSF(NSF):
       Z = torch.matmul(W, F) #shape ExDxN
       pY = distributions.Poisson((V[idx])*Z)
 
-      pF2 = distributions.Normal(torch.zeros_like(self.mF[:, idx]), (self.gp.kernel.sigma)*torch.ones_like(scaleF[:, idx]))
+      pF2 = distributions.Normal(torch.zeros_like(self.mF[:, idx]), torch.ones_like(scaleF[:, idx]))
 
       return pY, qF, qU, pU, qF2, pF2
 

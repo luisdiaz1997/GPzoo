@@ -42,6 +42,10 @@ class NSF_RBF(nn.Module):
       return ((self.sigma**2).squeeze())[:, None].expand(-1, X.size(0))
 
     distance_squared = _squared_dist(X, Z)
+    return self.forward_distance(distance_squared)
+  
+  def forward_distance(self, distance_squared):
+    
     distance_squared = (distance_squared[None, :, :]).expand(self.L, -1, -1)
     return self.sigma**2 * torch.exp(-0.5*distance_squared/(self.lengthscale**2))
   
