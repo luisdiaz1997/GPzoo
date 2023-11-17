@@ -36,16 +36,17 @@ def _squared_dist(X, Z):
     return r2.clamp(min=0)
 
 def add_jitter(K, jitter=1e-3):
-    if K.dim()==2:
-        N, _ =  K.shape
-        K.view(-1)[::N+1] += jitter
-        return K
+    mat = K
 
-    if K.dim()==3:
-        L, N, _ = K.shape
-        K.view(L, -1)[:, ::N+1] += jitter
-        
-        return K
+    if mat.dim()==2:
+        N, _ =  mat.shape
+        mat.view(-1)[::N+1] += jitter
+        return mat
+
+    if mat.dim()==3:
+        L, N, _ = mat.shape
+        mat.view(L, -1)[:, ::N+1] += jitter
+        return mat
     
 
 def _torch_sqrt(x, eps=1e-12):

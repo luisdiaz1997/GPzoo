@@ -23,31 +23,31 @@ class RBF(nn.Module):
     
     if return_distance:
       return output, distance
+
+    return self.forward_distance(distance_squared)
+  
+  def forward_distance(self, distance_squared):
     
-    return output
+    return (self.sigma**2) * torch.exp(-0.5*distance_squared/(self.lengthscale**2))
     
 
-class NSF_RBF(nn.Module):
+class NSF_RBF(RBF):
   def __init__(self, sigma=1.0, lengthscale=2.0, L=10):
-    super().__init__()
+    super().__init__(sigma=sigma, lengthscale=lengthscale)
 
     self.L = L
     self.sigma = nn.Parameter(sigma*torch.ones((L, 1, 1)))
     self.lengthscale = nn.Parameter(lengthscale*torch.ones((L, 1, 1)))
-    self.input_dim = 2
   
   def forward(self, X, Z, diag=False):
 
     if diag:
       return ((self.sigma**2).squeeze())[:, None].expand(-1, X.size(0))
 
-    distance_squared = _squared_dist(X, Z)
-    return self.forward_distance(distance_squared)
-  
-  def forward_distance(self, distance_squared):
-    
+    distance_squared = torch.cdist(X, Z) ** 2
     distance_squared = (distance_squared[None, :, :]).expand(self.L, -1, -1)
-    return self.sigma**2 * torch.exp(-0.5*distance_squared/(self.lengthscale**2))
+
+    return self.forward_distance(distance_squared)
   
 
 class MGGP_RBF(RBF):
