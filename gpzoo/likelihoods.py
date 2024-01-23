@@ -25,6 +25,8 @@ class NSF(nn.Module):
       super().__init__()
       D, N = y.shape
       self.gp = gp
+
+      # make these optional
       self.gp.Lu = nn.Parameter(5e-2*torch.rand((L, M, M)))
       self.gp.mu = nn.Parameter(torch.zeros((L, M)))
 
@@ -35,7 +37,7 @@ class NSF(nn.Module):
     
     #experimental batched forward
     def batched_forward(self, X, idx, E=10, verbose=False):
-      qF, qU, pU = self.svgp(X, verbose)
+      qF, qU, pU = self.gp(X, verbose)
       F = qF.rsample((E,)) #shape ExLxN
       F = torch.exp(F)
 
@@ -46,13 +48,15 @@ class NSF(nn.Module):
       return pY, qF, qU, pU
 
     def forward(self, X, E=10, verbose=False):
-      qF, qU, pU = self.svgp(X, verbose)
+      qF, qU, pU = self.gp(X, verbose)
         
       F = qF.rsample((E,)) #shape ExLxN
       # F = 255*torch.softmax(F, dim=2)
       F = torch.exp(F)
       #F = torch.transpose(F, -2, -1)
-      Z = torch.matmul(torch.abs(self.W), F) #shape ExDxN
+      print("F shape ", F.shape)
+      print("W shape ", self.W.shape)
+      Z = torch.matmul((torch.abs(self.W)), F)
       pY = distributions.Poisson(torch.abs(self.V)*Z)
       return pY, qF, qU, pU
     

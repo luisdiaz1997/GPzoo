@@ -16,7 +16,10 @@ def svgp_forward(Kxx: torch.Tensor, Kzz: torch.Tensor, W: torch.Tensor, inducing
 
         output: Tensor of shape (L x N x 1), Tensor of shape (L x N)
     '''
+    print("Shapw W: ", W.shape)
+    print("Shape inducing_mean ", inducing_mean.shape)
     mean = W@ (inducing_mean.unsqueeze(-1))
+    
     diff = inducing_cov-Kzz #shape L x M x M
     cov = Kxx + torch.sum((W @ diff)* W, dim=-1) #shape L x N
     
