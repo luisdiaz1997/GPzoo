@@ -29,7 +29,7 @@ def rescale_spatial_coords(X,box_side=4):
     return X - X.mean(axis=0)
 
 def anndata_to_train_val(ad, layer=None, nfeat=None, train_frac=0.95,
-                         sz="constant", dtp="float32", flip_yaxis=True):
+                         sz="constant", dtp="float32", flip_yaxis=False):
     """
     Convert anndata object ad to a training data dictionary
     and a validation data dictionary
