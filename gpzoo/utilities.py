@@ -6,6 +6,11 @@ from torch.nn.utils import clip_grad_norm_
 
 
 
+def reshape_param(param):
+    param_shape = param.shape
+    param = param.view(-1, param_shape[-2], param_shape[-1])
+    return param
+
 def svgp_forward(Kxx: torch.Tensor, Kzz: torch.Tensor, W: torch.Tensor, inducing_mean: torch.Tensor, inducing_cov: torch.Tensor)-> (torch.Tensor, torch.Tensor):
     '''
         Kxx: Tensor of shape (L x N)
@@ -34,16 +39,17 @@ def _squared_dist(X, Z):
     return r2.clamp(min=0)
 
 def add_jitter(K, jitter=1e-3):
-    if K.dim()==2:
-        N, _ =  K.shape
-        K.view(-1)[::N+1] += jitter
-        return K
+    mat = K
 
-    if K.dim()==3:
-        L, N, _ = K.shape
-        K.view(L, -1)[:, ::N+1] += jitter
-        
-        return K
+    if mat.dim()==2:
+        N, _ =  mat.shape
+        mat.view(-1)[::N+1] += jitter
+        return mat
+
+    if mat.dim()==3:
+        L, N, _ = mat.shape
+        mat.view(L, -1)[:, ::N+1] += jitter
+        return mat
     
 
 def _torch_sqrt(x, eps=1e-12):
@@ -66,18 +72,76 @@ def _embed_distance_matrix(distance_matrix):
     embedding = Q @ torch.diag(_torch_sqrt(L, 1e-6))
     return embedding
 
-def train(model, optimizer, X, groupsX, y, device, steps=200, E=20):
+def train(model, optimizer, X, y, device, steps=200, E=20, **kwargs):
     losses = []
-    for it in tqdm(range(steps)):
+    for _ in tqdm(range(steps)):
 
         optimizer.zero_grad()
-        pY, _ , qU, pU = model(X, groupsX, E=E)
+        pY, _ , qU, pU = model(X=X, E=E, **kwargs)
 
 
         ELBO = (pY.log_prob(y)).mean(axis=0).sum()
 
         ELBO -= torch.sum(distributions.kl_divergence(qU, pU))
 
+
+        loss = -ELBO
+        loss.backward()
+        optimizer.step()
+        losses.append(loss.item())
+    
+    with torch.no_grad():
+        if device.type=='cuda':
+            torch.cuda.empty_cache()
+        
+    return losses
+
+
+
+
+def train_hybrid_batched(model, optimizer, X, y, device, steps=200, E=20, batch_size=1000, **kwargs):
+    losses = []
+    for it in tqdm(range(steps)):
+        
+
+        idx = torch.multinomial(torch.ones(X.shape[0]), num_samples=batch_size, replacement=False)
+
+
+        optimizer.zero_grad()
+        pY, _ , qU, pU, qF, pF = model.forward_batched(X=X, idx=idx, E=E, **kwargs)
+
+        logpY = pY.log_prob(y[:, idx])
+        # print(logpY.shape)
+
+        ELBO = (logpY).mean(axis=0).sum()
+
+        ELBO -= torch.sum(distributions.kl_divergence(qU, pU))
+        ELBO -= torch.sum(distributions.kl_divergence(qF, pF))
+
+        loss = -ELBO
+        loss.backward()
+        optimizer.step()
+        losses.append(loss.item())
+    
+    with torch.no_grad():
+        if device.type=='cuda':
+            torch.cuda.empty_cache()
+        
+    return losses
+
+
+def train_hybrid(model, optimizer, X, y, device, steps=200, E=20, **kwargs):
+    losses = []
+    for _ in tqdm(range(steps)):
+
+        optimizer.zero_grad()
+        pY, _ , qU, pU, qF, pF = model(X=X, E=E, **kwargs)
+
+
+        ELBO = (pY.log_prob(y)).mean(axis=0).sum()
+
+        ELBO -= torch.sum(distributions.kl_divergence(qU, pU))
+        ELBO -= torch.sum(distributions.kl_divergence(qF, pF))
 
         loss = -ELBO
         loss.backward()
@@ -123,7 +187,7 @@ def train_closure_batched(model, optimizer, X, groupsX, y, device, steps=200, E=
 
 
 
-def train_batched(model, optimizer, X, groupsX, y, device, steps=200, E=20, batch_size=1000):
+def train_batched(model, optimizer, X, y, device, steps=200, E=20, batch_size=1000, **kwargs):
     losses = []
     for it in tqdm(range(steps)):
         
@@ -132,7 +196,7 @@ def train_batched(model, optimizer, X, groupsX, y, device, steps=200, E=20, batc
 
 
         optimizer.zero_grad()
-        pY, _ , qU, pU = model.forward_batched(X, groupsX, idx, E=E)
+        pY, _ , qU, pU = model.forward_batched(X=X, idx=idx, E=E, **kwargs)
 
         logpY = pY.log_prob(y[:, idx])
         # print(logpY.shape)
