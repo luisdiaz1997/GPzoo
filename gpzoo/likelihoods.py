@@ -22,6 +22,26 @@ class GaussianLikelihood(nn.Module):
 
     return pY, qF, qU, pU
   
+class PNMF(nn.Module):
+  def __init__(self, prior, y, L=10):
+    super().__init__()
+    D, N = y.shape
+    self.prior = prior
+    self.W = nn.Parameter(torch.rand((D, L)))
+    self.V = nn.Parameter(torch.ones((N,)))
+
+  def forward(self, E=10, **kwargs):
+    qF, pF = self.prior()
+    F = qF.rsample((E,))
+
+    F = torch.exp(F)
+    W = torch.nn.functional.softplus(self.W)
+    V = torch.nn.functional.softplus(self.V)
+
+    Z = torch.matmul(W, F) #shape ExDxN
+    pY = distributions.Poisson(V*Z)
+
+    return pY, qF, pF
 
 class NSF(nn.Module):
     def __init__(self, gp, y, L=10):
@@ -93,10 +113,13 @@ class Hybrid_NSF(NSF):
       # F = 255*torch.softmax(F, dim=2)
       F = torch.exp(F)
       #F = torch.transpose(F, -2, -1)
-      W = torch.nn.functional.softplus(self.W)
-      W2 = torch.nn.functional.softplus(self.W2) 
+      # W = torch.nn.functional.softplus(self.W)
+      # W2 = torch.nn.functional.softplus(self.W2)
+      # W = torch.clamp(W, min=0.0)
+      # W2 = torch.clamp(W2, min=0.0)
+      
 
-      W = torch.cat((W, W2), dim=1)
+      W = torch.cat((self.W, self.W2), dim=1)
 
       V = torch.nn.functional.softplus(self.V)
 
@@ -121,13 +144,11 @@ class Hybrid_NSF(NSF):
 
       F = torch.cat((F, F2), dim=1)
 
-      # F = 255*torch.softmax(F, dim=2)
-      F = torch.exp(F)
-      #F = torch.transpose(F, -2, -1)
-      W = torch.nn.functional.softplus(self.W)
-      W2 = torch.nn.functional.softplus(self.W2) 
 
-      W = torch.cat((W, W2), dim=1)
+      F = torch.exp(F)
+
+
+      W = torch.cat((self.W, self.W2), dim=1)
 
       V = torch.nn.functional.softplus(self.V)
 
@@ -150,6 +171,11 @@ class MGGP_NSF(nn.Module):
 
     
     def forward_batched(self, X, groupsX, idx, E=10, verbose=False):
+
+      if verbose:
+        print('X:shape:',X[idx].shape)
+        print('groupsX.shape:',groupsX[idx].shape)
+
       qF, qU, pU = self.gp(X[idx], groupsX[idx], verbose)
       
       W = torch.nn.functional.softplus(self.W)

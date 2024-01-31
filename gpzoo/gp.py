@@ -208,6 +208,21 @@ class SVGP2(nn.Module):
     return qF, qU, pU
 
 
+class GaussianPrior(nn.Module):
+  def __init__(self, y, L=10):
+    super().__init__()
+    D, N = y.shape
+    self.mean = nn.Parameter(torch.randn(size=(L, N)))
+    self.scale = nn.Parameter(torch.rand(size=(L, N)))
+
+  def forward(self):
+    scale = torch.nn.functional.softplus(self.scale) #ensure it's positive
+    qF = distributions.Normal(self.mean, scale)
+    pF = distributions.Normal(torch.zeros_like(self.mean), torch.ones_like(scale))
+    
+    return qF, pF
+
+
 class SVGP(nn.Module):
   def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
     super().__init__()
