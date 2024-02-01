@@ -6,7 +6,6 @@ from torch.distributions import constraints, transform_to
 
 from .gp import MGGP_SVGP
 
-
 class GaussianLikelihood(nn.Module):
   def __init__(self, gp, noise=0.1):
     super().__init__()
@@ -22,23 +21,36 @@ class GaussianLikelihood(nn.Module):
 
     return pY, qF, qU, pU
   
-class PNMF(nn.Module):
+
+class PoissonLikelihood(nn.Module):
+  '''
+  Poisson Factorization base model for both PNMF, and NSF
+  '''
   def __init__(self, prior, y, L=10):
     super().__init__()
     D, N = y.shape
     self.prior = prior
     self.W = nn.Parameter(torch.rand((D, L)))
+
+  def get_rate(self, prior_samples):
+    F = torch.exp(prior_samples)
+    W = torch.nn.functional.softplus(self.W)
+    Z = torch.matmul(W, F) #shape ExDxN
+    return Z
+
+
+class PNMF(PoissonLikelihood):
+  def __init__(self, prior, y, L=10):
+    super().__init__(prior=prior, y=y, L=L)
+    D, N = y.shape
     self.V = nn.Parameter(torch.ones((N,)))
 
   def forward(self, E=10, **kwargs):
     qF, pF = self.prior()
     F = qF.rsample((E,))
 
-    F = torch.exp(F)
-    W = torch.nn.functional.softplus(self.W)
+    Z = self.get_rate(F)
     V = torch.nn.functional.softplus(self.V)
-
-    Z = torch.matmul(W, F) #shape ExDxN
     pY = distributions.Poisson(V*Z)
 
     return pY, qF, pF
@@ -82,6 +94,23 @@ class NSF(nn.Module):
       pY = distributions.Poisson((V[idx])*Z)
       return pY, qF, qU, pU
     
+
+class Hybrid_NSF2(nn.Module):
+  def __init__(self, nsf_model, pnmf_model):
+    super().__init__()
+    self.nsf_model = nsf_model
+    self.pnmf_model = pnmf_model
+
+  def forward(self, X, E=10, **kwargs):
+
+    pY1, qF, pF = self.pnmf_model.forward(E=E, **kwargs)
+
+    pY2, _, qU, pU = self.nsf_model.forward(X, E=E, **kwargs)
+
+    
+
+    return 0
+
 
 class Hybrid_NSF(NSF):
     def __init__(self, gp, y, L=10, non_spatial_factors=10):
