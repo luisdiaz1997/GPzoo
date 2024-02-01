@@ -22,7 +22,7 @@ class GaussianLikelihood(nn.Module):
     return pY, qF, qU, pU
   
 
-class PoissonLikelihood(nn.Module):
+class PoissonFactorization(nn.Module):
   '''
   Poisson Factorization base model for both PNMF, and NSF
   '''
@@ -39,7 +39,7 @@ class PoissonLikelihood(nn.Module):
     return Z
 
 
-class PNMF(PoissonLikelihood):
+class PNMF(PoissonFactorization):
   def __init__(self, prior, y, L=10):
     super().__init__(prior=prior, y=y, L=L)
     D, N = y.shape
@@ -54,6 +54,50 @@ class PNMF(PoissonLikelihood):
     pY = distributions.Poisson(V*Z)
 
     return pY, qF, pF
+  
+class NSF2(PoissonFactorization):
+  def __init__(self, gp, y, L=10):
+    super().__init__(prior=gp, y=y, L=L)
+    D, N = y.shape
+    self.V = nn.Parameter(torch.ones((N,)))
+
+  def forward(self, X, E=10, verbose=False, **kwargs):
+    qF, qU, pU = self.prior(X=X, verbose=verbose, **kwargs)
+    F = qF.rsample((E,))
+    Z = self.get_rate(F)
+    V = torch.nn.functional.softplus(self.V)
+    pY = distributions.Poisson(V*Z)
+
+    return pY, qF, qU, pU
+  
+
+class Hybrid_NSF2(nn.Module):
+  def __init__(self, gp, prior, y, L=10, T=10):
+    super().__init__()
+
+    D, N = y.shape
+    self.sf = PoissonFactorization(prior = gp, y=y, L=L)
+    self.cf = PoissonFactorization(prior = prior, y=y, L=T)
+    self.V = nn.Parameter(torch.ones((N,)))
+
+
+  def forward(self, X, E=10, verbose=False, **kwargs):
+    qF1, qU, pU = self.sf.prior(X=X, verbose=verbose, **kwargs)
+    qF2, pF2 = self.cf.prior()
+
+    F1 = qF1.rsample((E,))
+    F2 = qF2.rsample((E,))
+
+
+    Z1 = self.sf.get_rate(F1)
+    Z2 = self.cf.get_rate(F2)
+    Z = Z1+Z2
+
+    V = torch.nn.functional.softplus(self.V)
+    pY = distributions.Poisson(V*Z)
+
+    return pY, qF1, qU, pU, qF2, pF2
+
 
 class NSF(nn.Module):
     def __init__(self, gp, y, L=10):
@@ -94,22 +138,6 @@ class NSF(nn.Module):
       pY = distributions.Poisson((V[idx])*Z)
       return pY, qF, qU, pU
     
-
-class Hybrid_NSF2(nn.Module):
-  def __init__(self, nsf_model, pnmf_model):
-    super().__init__()
-    self.nsf_model = nsf_model
-    self.pnmf_model = pnmf_model
-
-  def forward(self, X, E=10, **kwargs):
-
-    pY1, qF, pF = self.pnmf_model.forward(E=E, **kwargs)
-
-    pY2, _, qU, pU = self.nsf_model.forward(X, E=E, **kwargs)
-
-    
-
-    return 0
 
 
 class Hybrid_NSF(NSF):
