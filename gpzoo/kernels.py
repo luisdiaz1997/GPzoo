@@ -3,7 +3,6 @@ import torch.nn as nn
 
 from .utilities import _squared_dist, _torch_sqrt, _embed_distance_matrix
 
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 class RBF(nn.Module):
   def __init__(self, sigma=1.0, lengthscale=2.0):
@@ -13,33 +12,42 @@ class RBF(nn.Module):
     self.lengthscale = nn.Parameter(torch.tensor(lengthscale))
     self.input_dim = 2
     
-  def forward(self, X, Z, diag=True):
+  def forward(self, X, Z, diag=False, return_distance=False):
     if diag :
         return (self.sigma**2).expand(X.size(0))
     
+    distance = torch.cdist(X, Z)
+    distance_squared = distance ** 2
 
-    distance_squared = _squared_dist(X, Z)
+    output = self.sigma**2 * torch.exp(-0.5*distance_squared/(self.lengthscale**2))
+    
+    if return_distance:
+      return output, distance
 
-    return self.sigma**2 * torch.exp(-0.5*distance_squared/(self.lengthscale**2))
+    return self.forward_distance(distance_squared)
+  
+  def forward_distance(self, distance_squared):
+    
+    return (self.sigma**2) * torch.exp(-0.5*distance_squared/(self.lengthscale**2))
     
 
-class NSF_RBF(nn.Module):
+class NSF_RBF(RBF):
   def __init__(self, sigma=1.0, lengthscale=2.0, L=10):
-    super().__init__()
+    super().__init__(sigma=sigma, lengthscale=lengthscale)
 
     self.L = L
     self.sigma = nn.Parameter(sigma*torch.ones((L, 1, 1)))
     self.lengthscale = nn.Parameter(lengthscale*torch.ones((L, 1, 1)))
-    self.input_dim = 2
   
   def forward(self, X, Z, diag=False):
 
     if diag:
       return ((self.sigma**2).squeeze())[:, None].expand(-1, X.size(0))
 
-    distance_squared = _squared_dist(X, Z)
+    distance_squared = torch.cdist(X, Z) ** 2
     distance_squared = (distance_squared[None, :, :]).expand(self.L, -1, -1)
-    return self.sigma**2 * torch.exp(-0.5*distance_squared/(self.lengthscale**2))
+
+    return self.forward_distance(distance_squared)
   
 
 class MGGP_RBF(RBF):
@@ -83,7 +91,7 @@ class MGGP_NSF_RBF(NSF_RBF):
     self.group_diff_param = nn.Parameter(group_diff_param*torch.ones((L, 1, 1)))
 
     group_distances = torch.ones(n_groups) - torch.eye(n_groups)
-    self.embedding = _embed_distance_matrix(group_distances).to(device)
+    self.embedding = nn.Parameter(_embed_distance_matrix(group_distances), requires_grad=False)
 
 
   def forward(self, X, Z, groupsX, groupsZ, diag=False):
