@@ -5,13 +5,36 @@ from functools import partial
 from torch.nn.utils import clip_grad_norm_
 from sklearn.decomposition import NMF
 import numpy as np
-from anndata import AnnData
-from squidpy.gr import spatial_neighbors,spatial_autocorr
+
+from sklearn.linear_model import LinearRegression
+from sklearn.neighbors import KNeighborsRegressor
+from math import ceil
 
 
 '''
 code from original NSF paper https://github.com/willtownes/nsf-paper/tree/main
 '''
+
+def smooth_spatial_factors(F,Z,X=None):
+  """
+  F: real-valued factors (ie on the log scale for NSF)
+  Z: inducing point locations
+  X: spatial coordinates
+  """
+  M = Z.shape[0]
+  if X is None: #no spatial coordinates, just use the mean
+    beta0 = F.mean(axis=0)
+    U = np.tile(beta0,[M,1])
+    beta = None
+  else: #spatial coordinates
+    lr = LinearRegression().fit(X,F)
+    beta0 = lr.intercept_
+    beta = lr.coef_
+    nn = max(2, ceil(X.shape[0]/M))
+    knn = KNeighborsRegressor(n_neighbors=nn).fit(X,F)
+    U = knn.predict(Z)
+  return U,beta0,beta
+
 
 def rescale_spatial_coords(X,box_side=4):
     """
@@ -86,6 +109,9 @@ def dims_autocorr(factors,coords,sort=True):
     indexing factors[:,idx] will sort the factors in decreasing order of spatial
     autocorrelation.
     """
+    from anndata import AnnData
+    from squidpy.gr import spatial_neighbors,spatial_autocorr
+
     ad = AnnData(X=factors,obsm={"spatial":coords})
     spatial_neighbors(ad)
     df = spatial_autocorr(ad,mode="moran",copy=True)
