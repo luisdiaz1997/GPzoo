@@ -218,9 +218,18 @@ class GaussianPrior(nn.Module):
   def forward(self):
     scale = torch.nn.functional.softplus(self.scale) #ensure it's positive
     qF = distributions.Normal(self.mean, scale)
-    pF = distributions.Normal(torch.zeros_like(self.mean), torch.ones_like(scale))
+    pF = distributions.Normal(torch.zeros_like(qF.mean), torch.ones_like(qF.scale))
     
     return qF, pF
+  
+  def forward_batched(self, idx):
+
+    scale = torch.nn.functional.softplus(self.scale[:, idx]) #ensure it's positive
+    qF = distributions.Normal(self.mean[:, idx], scale)
+    pF = distributions.Normal(torch.zeros_like(qF.mean), torch.ones_like(qF.scale))
+
+    return qF, pF
+
 
 
 class SVGP(nn.Module):
