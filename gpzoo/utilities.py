@@ -9,6 +9,7 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.neighbors import KNeighborsRegressor
 from math import ceil
+import matplotlib.pyplot as plt
 
 
 '''
@@ -88,6 +89,7 @@ def anndata_to_train_val(ad, layer=None, nfeat=None, train_frac=0.95,
         raise ValueError("unrecognized size factors 'sz'")
     
     Dtr["idx"] = np.arange(Ntr)
+    Dval["idx"] = np.arange(Ntr, N)
     if Ntr>=N: Dval = None #avoid returning an empty array
     return Dtr,Dval
 
@@ -241,6 +243,35 @@ def add_jitter(K, jitter=1e-3):
         mat.view(L, -1)[:, ::N+1] += jitter
         return mat
     
+
+def plot_factors(factors, X, moran_idx=None, ax=None, size=7, alpha=0.8, s=0.1, names=None):
+    
+    max_val = np.percentile(factors, 95)
+    min_val = np.percentile(factors, 5)
+    if moran_idx is not None:
+        factors = factors[moran_idx]
+        if names is not None:
+            names = names[moran_idx]
+
+    L = len(factors)
+
+    if ax is None:
+        fig, ax = plt.subplots(L//5, 5, figsize=(size*5, size*(L//5)), tight_layout=True)
+        
+    for i in range(L):
+        plt.subplot(L//5, 5, i+1)
+        
+        curr_ax = ax[i//5, i%5]
+        
+        curr_ax.scatter(X[:, 0], X[:,1], c=factors[i], vmin=min_val, vmax=max_val, alpha=alpha, cmap='turbo', s=s)
+
+        curr_ax.invert_yaxis()
+        if names is not None:
+            curr_ax.set_title(names[i], x=0.03, y=.88, fontsize="small", c="white",
+                     ha="left", va="top")
+        curr_ax.set_xticks([])
+        curr_ax.set_yticks([])
+        curr_ax.set_facecolor('xkcd:gray')
 
 def _torch_sqrt(x, eps=1e-12):
     """
