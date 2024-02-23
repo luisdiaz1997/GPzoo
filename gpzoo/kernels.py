@@ -3,7 +3,6 @@ import torch.nn as nn
 
 from .utilities import _squared_dist, _torch_sqrt, _embed_distance_matrix
 
-
 class RBF(nn.Module):
   def __init__(self, sigma=1.0, lengthscale=2.0):
     super().__init__()
@@ -39,13 +38,19 @@ class NSF_RBF(RBF):
     self.sigma = nn.Parameter(sigma*torch.ones((L, 1, 1)))
     self.lengthscale = nn.Parameter(lengthscale*torch.ones((L, 1, 1)))
   
-  def forward(self, X, Z, diag=False):
+  def forward(self, X, Z, diag=False, return_distance=False):
 
     if diag:
       return ((self.sigma**2).squeeze())[:, None].expand(-1, X.size(0))
 
-    distance_squared = torch.cdist(X, Z) ** 2
+    distance = torch.cdist(X, Z)
+    distance_squared = distance ** 2
     distance_squared = (distance_squared[None, :, :]).expand(self.L, -1, -1)
+
+    output = self.forward_distance(distance_squared)
+
+    if return_distance:
+      return output, distance
 
     return self.forward_distance(distance_squared)
   
@@ -80,8 +85,6 @@ class MGGP_RBF(RBF):
     distance_squared = distance_squared/(self.lengthscale**2)
 
     return self.sigma**2 * torch.exp(-0.5 * distance_squared/ (self.group_diff_param * group_r2 + 1)) * scale
-
-
 
 
 class MGGP_NSF_RBF(NSF_RBF):
