@@ -71,6 +71,16 @@ class NSF2(PoissonFactorization):
     return pY, qF, qU, pU
   
 
+  def forward_batched(self, X, idx, E=10, verbose=False, **kwargs):
+    qF, qU, pU = self.prior(X=X[idx], verbose=verbose, **kwargs)
+    F = qF.rsample((E,))
+    Z = self.get_rate(F)
+    V = torch.nn.functional.softplus(self.V[idx])
+    pY = distributions.Poisson(V*Z)
+
+    return pY, qF, qU, pU
+
+
 class Hybrid_NSF2(nn.Module):
   def __init__(self, gp, prior, y, L=10, T=10):
     super().__init__()
@@ -94,6 +104,26 @@ class Hybrid_NSF2(nn.Module):
     Z = Z1+Z2
 
     V = torch.nn.functional.softplus(self.V)
+    pY = distributions.Poisson(V*Z)
+
+    return pY, qF1, qU, pU, qF2, pF2
+
+  
+  def forward_batched(self, X, idx, E=10, verbose=False, **kwargs):
+
+    qF1, qU, pU = self.sf.prior(X=X[idx], verbose=verbose, **kwargs)
+    qF2, pF2 = self.cf.prior.forward_batched(idx)
+
+    F1 = qF1.rsample((E,))
+    F2 = qF2.rsample((E,))
+
+    Z1 = self.sf.get_rate(F1)
+    Z2 = self.cf.get_rate(F2)
+
+    Z = Z1+Z2
+
+    V = torch.nn.functional.softplus(self.V[idx])
+    
     pY = distributions.Poisson(V*Z)
 
     return pY, qF1, qU, pU, qF2, pF2

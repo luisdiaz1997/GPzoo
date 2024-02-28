@@ -115,8 +115,10 @@ class MGGP_NSF_RBF(NSF_RBF):
     assert distance_squared.shape == group_r2.shape
 
 
-    scale = 1 / (torch.abs(self.group_diff_param) * group_r2 + 1)**(0.5*self.input_dim)
+    denom = torch.square(self.group_diff_param) * group_r2 + 1
+
+    scale = 1 / (denom**(0.5*self.input_dim))
 
     distance_squared = distance_squared/(self.lengthscale**2)
 
-    return self.sigma**2 * torch.exp(-0.5 * distance_squared/ (torch.abs(self.group_diff_param) * group_r2 + 1)) * scale
+    return self.sigma**2 * torch.exp(-0.5 * distance_squared/ denom) * scale
