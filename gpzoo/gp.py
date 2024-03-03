@@ -29,7 +29,6 @@ class VNNGP(nn.Module):
     
 
     Kxz, distances = self.kernel(X, self.Z, return_distance=True)
-    print(f'distances: {distances.shape}')
 
     Kxz_shape = Kxz.shape
     Kxz = Kxz.contiguous().view(-1, Kxz_shape[-1]) # (... x N) x M
@@ -62,7 +61,6 @@ class VNNGP(nn.Module):
 
 
     indexes = torch.argsort(distances, dim=1)[:, :self.K]
-    print('Indexes shape: ', indexes.shape)
 
     little_L = L[:, indexes] # ... x N x K x M
 
@@ -75,13 +73,8 @@ class VNNGP(nn.Module):
 
 
     kzz_inv = torch.inverse(add_jitter(little_Kzz, self.jitter)) # (... x N) x KxK
-      
-    print(f'Kxz: {Kxz.shape}')
-    print(f'kzz_inv: {kzz_inv.shape}')
-    print(f'indexes: {indexes.shape}')
 
     expanded = indexes.repeat(Kxx_shape[0], 1)
-    print('Expanded shape', expanded.shape)
 
     little_Kxz = torch.gather(Kxz, 1, expanded)[:, None, :] #(... x N)x1xK
     
