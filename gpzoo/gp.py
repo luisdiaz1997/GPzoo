@@ -254,6 +254,17 @@ class SVGP(nn.Module):
     self.distance = nn.Parameter(torch.cdist(X, self.Z)) #shape N x M
     self.idz = idz
 
+  def kernel_forward(self, X, Z, **args):
+    
+    return self.kernel(X, Z, **args)
+  
+  def forward_kernels(self, X, Z, **args):
+
+    Kxx = self.kernel(X, X, diag=True)
+    Kzx = self.kernel(self.Z, X)
+    Kzz = self.kernel(self.Z, self.Z)
+
+    return Kxx, Kzx, Kzz
 
   def forward(self, X, verbose=False):
 
@@ -269,7 +280,7 @@ class SVGP(nn.Module):
 
       Kzx = self.kernel.forward_distance(distance_squared=(self.distance.T)**2) #shape L x M x N
     else:
-      Kzx = self.kernel(self.Z, X) #shape L x M x N
+      Kzx = self.kernel_forward(self.Z, X) #shape L x M x N
 
     if verbose:
       print('calculating kzz')
@@ -280,7 +291,7 @@ class SVGP(nn.Module):
       Kzz = (Kzx.view(-1, Kzx_shape[-2], Kzx_shape[-1]))[:, :, self.idz]
       Kzz = torch.squeeze(Kzz)
     else:
-      Kzz = self.kernel(self.Z, self.Z) #shape L x M x M
+      Kzz = self.kernel_forward(self.Z, self.Z) #shape L x M x M
 
     if verbose:
       print('calculating cholesky')

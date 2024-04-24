@@ -4,8 +4,6 @@ import torch
 
 from torch.distributions import constraints, transform_to
 
-from .gp import MGGP_SVGP
-
 class GaussianLikelihood(nn.Module):
   def __init__(self, gp, noise=0.1):
     super().__init__()
@@ -44,6 +42,8 @@ class PNMF(PoissonFactorization):
     super().__init__(prior=prior, y=y, L=L)
     D, N = y.shape
     self.V = nn.Parameter(torch.ones((N,)))
+    self.X = nn.Parameter(torch.zeros((N, 2)), requires_grad=False) #to keep track of inputs, for plotting purposes
+
 
   def forward(self, E=10, **kwargs):
     qF, pF = self.prior()

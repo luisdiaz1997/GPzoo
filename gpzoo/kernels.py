@@ -19,12 +19,12 @@ class RBF(nn.Module):
     distance = torch.cdist(X, Z)
     distance_squared = distance ** 2
 
-    output = self.sigma**2 * torch.exp(-0.5*distance_squared/(self.lengthscale**2))
+    output = self.forward_distance(distance_squared)
     
     if return_distance:
       return output, distance
 
-    return self.forward_distance(distance_squared)
+    return output
   
   def forward_distance(self, distance_squared):
     
