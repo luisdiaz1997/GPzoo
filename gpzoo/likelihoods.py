@@ -70,6 +70,7 @@ class NSF2(PoissonFactorization):
 
     return pY, qF, qU, pU
   
+
   def forward_batched(self, X, idx, E=10, verbose=False, **kwargs):
     qF, qU, pU = self.prior(X=X[idx], verbose=verbose, **kwargs)
     F = qF.rsample((E,))
@@ -78,6 +79,7 @@ class NSF2(PoissonFactorization):
     pY = distributions.Poisson(V*Z)
 
     return pY, qF, qU, pU
+
 
 class Hybrid_NSF2(nn.Module):
   def __init__(self, gp, prior, y, L=10, T=10):
@@ -105,6 +107,7 @@ class Hybrid_NSF2(nn.Module):
     pY = distributions.Poisson(V*Z)
 
     return pY, qF1, qU, pU, qF2, pF2
+
   
   def forward_batched(self, X, idx, E=10, verbose=False, **kwargs):
 
@@ -124,7 +127,7 @@ class Hybrid_NSF2(nn.Module):
     pY = distributions.Poisson(V*Z)
 
     return pY, qF1, qU, pU, qF2, pF2
-  
+
 
 class NSF(nn.Module):
     def __init__(self, gp, y, L=10):

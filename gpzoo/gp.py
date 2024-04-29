@@ -29,9 +29,10 @@ class VNNGP(nn.Module):
     
 
     Kxz, distances = self.kernel(X, self.Z, return_distance=True)
+    print(f'distances: {distances.shape}')
 
     Kxz_shape = Kxz.shape
-    Kxz = Kxz.view(-1, Kxz_shape[-1]) # (... x N) x M
+    Kxz = Kxz.contiguous().view(-1, Kxz_shape[-1]) # (... x N) x M
 
     if verbose:
       print('calculating Kxz')
@@ -40,7 +41,7 @@ class VNNGP(nn.Module):
     Kzz = self.kernel(self.Z, self.Z)
 
     Kzz_shape = Kzz.shape
-    Kzz = Kzz.view(-1, Kzz_shape[-2], Kzz_shape[-1]) # ... x M x M
+    Kzz = Kzz.contiguous().view(-1, Kzz_shape[-2], Kzz_shape[-1]) # ... x M x M
 
     if verbose:
       print('calculating kzz')
@@ -48,12 +49,12 @@ class VNNGP(nn.Module):
 
     Lu = transform_to(self.constraint)(self.Lu)
     Lu_shape = Lu.shape
-    Lu = Lu.view(-1, Lu_shape[-2], Lu_shape[-1]) # ... x M x M
+    Lu = Lu.contiguous().view(-1, Lu_shape[-2], Lu_shape[-1]) # ... x M x M
 
 
     L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter)) # ... x M x M
     L_shape = L.shape
-    L = L.view(-1, L_shape[-2], L_shape[-1]) # ... x M x M
+    L = L.contiguous().view(-1, L_shape[-2], L_shape[-1]) # ... x M x M
 
     if verbose:
       print('calculating L')
@@ -61,41 +62,44 @@ class VNNGP(nn.Module):
 
 
     indexes = torch.argsort(distances, dim=1)[:, :self.K]
+    print('Indexes shape: ', indexes.shape)
 
     little_L = L[:, indexes] # ... x N x K x M
 
     if verbose:
       print('Little_L.shape:', little_L.shape)
 
-
-
     little_Kzz = little_L @ torch.transpose(little_L, -2, -1) # ... x N x K x K
     little_Kzz_shape = little_Kzz.shape
-    little_Kzz = little_Kzz.view(-1, little_Kzz_shape[-2], little_Kzz_shape[-1]) # ( ... x N) x K x K
+    little_Kzz = little_Kzz.contiguous().view(-1, little_Kzz_shape[-2], little_Kzz_shape[-1]) # ( ... x N) x K x K
 
 
     kzz_inv = torch.inverse(add_jitter(little_Kzz, self.jitter)) # (... x N) x KxK
+      
+    print(f'Kxz: {Kxz.shape}')
+    print(f'kzz_inv: {kzz_inv.shape}')
+    print(f'indexes: {indexes.shape}')
 
-    little_Kxz = torch.gather(Kxz, 1, indexes.expand(Kxz.shape[0], -1))[:, None, :] #(... x N)x1xK
+    expanded = indexes.repeat(Kxx_shape[0], 1)
+    print('Expanded shape', expanded.shape)
 
-    W = little_Kxz  @ kzz_inv # (... x N) x 1 x K
+    little_Kxz = torch.gather(Kxz, 1, expanded)[:, None, :] #(... x N)x1xK
+    
+    W = little_Kxz  @ kzz_inv # (... x N) x 1 x K # issue is here
 
     if verbose:
       print('W_shape:', W.shape)
 
     mu_shape = self.mu.shape
 
-    mu = self.mu.view(-1, mu_shape[-1]) # ... x M
+    mu = self.mu.contiguous().view(-1, mu_shape[-1]) # ... x M
 
     little_mu = mu[:, indexes]# ... x  N x K
     little_mu = little_mu.view(-1, little_mu.shape[-1]) # (... x  N) x K
 
-
-
     little_Lu = Lu[:, indexes] # ... x N x K x M
     little_S = little_Lu @ torch.transpose(little_Lu, -2, -1) # ... x N x K x K
-    little_S = little_S.view(-1, little_S.shape[-2], little_S.shape[-1]) # (... x N) x K x K
-
+    little_S = little_S.contiguous().view(-1, little_S.shape[-2], little_S.shape[-1]) # (... x N) x K x K
 
     if verbose:
       print(Kxx.shape, little_Kzz.shape, W.shape, little_mu.shape, little_S.shape)
@@ -108,9 +112,8 @@ class VNNGP(nn.Module):
     mean = torch.squeeze(mean)
     cov = torch.squeeze(cov)
 
-    mean = mean.view(*Kxx_shape)
-    cov = cov.view(*Kxx_shape)
-
+    mean = mean.contiguous().view(*Kxx_shape)
+    cov = cov.contiguous().view(*Kxx_shape)
 
     qF = distributions.Normal(mean, torch.clamp(cov, min=5e-2) ** 0.5)
     qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
@@ -230,7 +233,6 @@ class GaussianPrior(nn.Module):
     pF = distributions.Normal(torch.zeros_like(qF.mean[:, idx]), self.scale_pf*torch.ones_like(qF.scale[:, idx]))
 
     return qF, pF
-
 
 
 class SVGP(nn.Module):
