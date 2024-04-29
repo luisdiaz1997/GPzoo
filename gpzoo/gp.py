@@ -21,7 +21,7 @@ class VNNGP(nn.Module):
 
     Kxx = self.kernel(X, X, diag=True)
     Kxx_shape = Kxx.shape
-    Kxx = Kxx.view(-1, 1) # (... x N) x 1
+    Kxx = Kxx.contiguous().view(-1, 1) # (... x N) x 1
 
     if verbose:
       print('calculating Kxx')
@@ -214,11 +214,12 @@ class GaussianPrior(nn.Module):
     D, N = y.shape
     self.mean = nn.Parameter(torch.randn(size=(L, N)))
     self.scale = nn.Parameter(torch.rand(size=(L, N)))
+    self.scale_pf = 1.0
 
   def forward(self):
     scale = torch.nn.functional.softplus(self.scale) #ensure it's positive
     qF = distributions.Normal(self.mean, scale)
-    pF = distributions.Normal(torch.zeros_like(qF.mean), torch.ones_like(qF.scale))
+    pF = distributions.Normal(torch.zeros_like(qF.mean), self.scale_pf*torch.ones_like(qF.scale))
     
     return qF, pF
   
@@ -226,7 +227,7 @@ class GaussianPrior(nn.Module):
 
     scale = torch.nn.functional.softplus(self.scale[:, idx]) #ensure it's positive
     qF = distributions.Normal(self.mean[:, idx], scale)
-    pF = distributions.Normal(torch.zeros_like(qF.mean), torch.ones_like(qF.scale))
+    pF = distributions.Normal(torch.zeros_like(qF.mean[:, idx]), self.scale_pf*torch.ones_like(qF.scale[:, idx]))
 
     return qF, pF
 
