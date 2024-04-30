@@ -111,6 +111,7 @@ def dims_autocorr(factors,coords,sort=True):
     autocorrelation.
     """
     from anndata import AnnData
+    print('here_andata')
     from squidpy.gr import spatial_neighbors,spatial_autocorr
 
     ad = AnnData(X=factors,obsm={"spatial":coords})
@@ -200,28 +201,6 @@ def scanpy_sizefactors(Y):
     sz = Y.sum(axis=1,keepdims=True)
     return sz/np.median(sz)
 
-def dims_autocorr(factors,coords,sort=True):
-    """
-    factors: (num observations) x (num latent dimensions) array
-    coords: (num observations) x (num spatial dimensions) array
-    sort: if True (default), returns the index and I statistics in decreasing
-    order of autocorrelation. If False, returns the index and I statistics
-    according to the ordering of factors.
-
-    returns: an integer array of length (num latent dims), "idx"
-    and a numpy array containing the Moran's I values for each dimension
-
-    indexing factors[:,idx] will sort the factors in decreasing order of spatial
-    autocorrelation.
-    """
-    ad = AnnData(X=factors,obsm={"spatial":coords})
-    spatial_neighbors(ad)
-    df = spatial_autocorr(ad,mode="moran",copy=True)
-    if not sort: #revert to original sort order
-        df.sort_index(inplace=True)
-    
-    idx = np.array([int(i) for i in df.index])
-    return idx,df["I"].to_numpy()
 
 def lnormal_approx_dirichlet(L):
     """
