@@ -11,6 +11,14 @@ from math import ceil
 import matplotlib.pyplot as plt
 
 
+def init_softplus(mat, minval= 1e-5):
+    mat2 = mat.copy()
+    mask = mat2<20
+    mat2[mask] = np.log(np.exp(mat2[mask])-1+minval)
+
+    return mat2
+
+
 '''
 code from original NSF paper https://github.com/willtownes/nsf-paper/tree/main
 '''
