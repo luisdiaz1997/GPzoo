@@ -295,10 +295,11 @@ class SVGP(nn.Module):
       Kzz = torch.squeeze(Kzz)
     else:
       Kzz = self.kernel_forward(self.Z, self.Z) #shape L x M x M
+      Kzz = add_jitter(Kzz, self.jitter)
 
     if verbose:
       print('calculating cholesky')
-    L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter)) #shape L x M x M
+    L = torch.linalg.cholesky(Kzz) #shape L x M x M
    
     if verbose:
         print('calculating W')
