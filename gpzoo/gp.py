@@ -230,7 +230,7 @@ class GaussianPrior(nn.Module):
 
     scale = torch.nn.functional.softplus(self.scale[:, idx]) #ensure it's positive
     qF = distributions.Normal(self.mean[:, idx], scale)
-    pF = distributions.Normal(torch.zeros_like(qF.mean[:, idx]), self.scale_pf*torch.ones_like(qF.scale[:, idx]))
+    pF = distributions.Normal(torch.zeros_like(qF.mean), self.scale_pf*torch.ones_like(qF.scale))
 
     return qF, pF
 
@@ -294,7 +294,7 @@ class SVGP(nn.Module):
       Kzz = (Kzx.view(-1, Kzx_shape[-2], Kzx_shape[-1]))[:, :, self.idz]
       Kzz = torch.squeeze(Kzz)
     else:
-      Kzz = self.kernel_forward(self.Z, self.Z) #shape L x M x M
+      Kzz = self.kernel_forward(self.Z, self.Z).contiguous() #shape L x M x M
       Kzz = add_jitter(Kzz, self.jitter)
 
     if verbose:
@@ -319,7 +319,82 @@ class SVGP(nn.Module):
     pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
 
     return qF, qU, pU
+  
 
+class WSVGP(nn.Module):
+  def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
+    super().__init__()
+    self.kernel = kernel
+    self.jitter = jitter
+    
+    self.Z = nn.Parameter(torch.randn((M, dim))) #choose random inducing points
+   
+    self.Lu = nn.Parameter(torch.randn((M,M)))
+    self.mu = nn.Parameter(torch.zeros((M,)))
+    self.constraint = constraints.lower_cholesky
+
+
+  def kernel_forward(self, X, Z, **args):
+    
+    return self.kernel(X, Z, **args)
+  
+  def forward_kernels(self, X, Z, **args):
+
+    Kxx = self.kernel(X, X, diag=True)
+    Kzx = self.kernel(self.Z, X)
+    Kzz = self.kernel(self.Z, self.Z)
+
+    return Kxx, Kzx, Kzz
+
+  def forward(self, X, verbose=False):
+
+    if verbose:
+      print('calculating Kxx')
+
+    Kxx = self.kernel(X, X, diag=True) #shape L x N
+
+    if verbose:
+      print('calculating Kzx')
+
+
+    Kzx = self.kernel_forward(self.Z, X) #shape L x M x N
+
+    if verbose:
+      print('calculating kzz')
+
+  
+    Kzz = self.kernel_forward(self.Z, self.Z).contiguous() #shape L x M x M
+    Kzz = add_jitter(Kzz, self.jitter)
+
+    if verbose:
+      print('calculating cholesky')
+    L = torch.linalg.cholesky(Kzz) #shape L x M x M
+   
+    if verbose:
+        print('calculating W')
+   
+    W = torch.cholesky_solve(Kzx, L) #(Kzz)-1 @ Kzx
+
+
+    Wt = torch.linalg.solve_triangular(L, Kzx, upper=False)  #(Lzz)-1 @ Kzx
+    W = torch.transpose(Wt, -2, -1) # Kxz@(Lzz)-1, shape # L x N x M
+    Lu = transform_to(self.constraint)(self.Lu) #shape L x M x M
+    # S = Lu @ torch.transpose(Lu, -2, -1) # shape L x M x M
+
+    # S = transform_to(self.constraint)(self.S)
+
+    cov_diag = torch.clamp(Kxx - torch.sum(W**2, dim=-1), min=0.0)
+    cov_diag = cov_diag + torch.sum((W@Lu**2), dim=-1)
+
+    mean = W @ (self.mu.unsqueeze(-1))
+    mean = torch.squeeze(mean)
+    
+    qF = distributions.Normal(mean, cov_diag ** 0.5)
+    qZ = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
+    pZ = distributions.Normal(torch.zeros(), torch.ones())
+
+    return qF, qZ, pZ
+  
 
 class MGGP_SVGP(nn.Module):
   def __init__(self, kernel, dim=1, M=50, jitter=1e-4, n_groups=2):
@@ -327,10 +402,10 @@ class MGGP_SVGP(nn.Module):
     self.kernel = kernel
     self.jitter = jitter
         
-    self.Z = nn.Parameter(torch.randn((n_groups*M, dim))) #choose inducing points
-    self.groupsZ = nn.Parameter(torch.concatenate([i*torch.ones(M) for i in range(n_groups)]).type(torch.LongTensor), requires_grad=False)
-    self.Lu = nn.Parameter(torch.randn((n_groups*M, n_groups*M)))
-    self.mu = nn.Parameter(torch.zeros((n_groups*M,)))
+    self.Z = nn.Parameter(torch.randn((M, dim))) #choose inducing points
+    self.groupsZ = nn.Parameter((torch.randint(0, n_groups, (M,))).type(torch.LongTensor), requires_grad=False)
+    self.Lu = nn.Parameter(torch.randn((M, M)))
+    self.mu = nn.Parameter(torch.zeros((M,)))
     self.constraint = constraints.lower_cholesky
 
   def forward(self, X, groupsX, verbose=False):
@@ -345,6 +420,10 @@ class MGGP_SVGP(nn.Module):
     if verbose:
       print('calculating kzz')
     Kzz = self.kernel(self.Z, self.Z, self.groupsZ, self.groupsZ)
+    Kzz = Kzz.contiguous()
+
+    if verbose:
+      print(Kzz.shape)
 
     if verbose:
       print('calculating cholesky')
