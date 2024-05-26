@@ -340,30 +340,18 @@ class WSVGP(nn.Module):
   
   def forward_kernels(self, X, Z, **args):
 
-    Kxx = self.kernel(X, X, diag=True)
-    Kzx = self.kernel(self.Z, X)
-    Kzz = self.kernel(self.Z, self.Z)
+    Kxx = self.kernel(X, X, diag=True)  #shape L x N
+    Kzx = self.kernel(self.Z, X) #shape L x M x N
+    Kzz = self.kernel(self.Z, self.Z).contiguous() #shape L x M x M
 
     return Kxx, Kzx, Kzz
 
-  def forward(self, X, verbose=False):
+  def forward(self, X, verbose=False, **args):
 
     if verbose:
-      print('calculating Kxx')
+      print('calculating kernels')
 
-    Kxx = self.kernel(X, X, diag=True) #shape L x N
-
-    if verbose:
-      print('calculating Kzx')
-
-
-    Kzx = self.kernel_forward(self.Z, X) #shape L x M x N
-
-    if verbose:
-      print('calculating kzz')
-
-  
-    Kzz = self.kernel_forward(self.Z, self.Z).contiguous() #shape L x M x M
+    Kxx, Kzx, Kzz = self.forward_kernels(X, self.Z, **args)
     Kzz = add_jitter(Kzz, self.jitter)
 
     if verbose:
@@ -373,25 +361,36 @@ class WSVGP(nn.Module):
     if verbose:
         print('calculating W')
    
-    W = torch.cholesky_solve(Kzx, L) #(Kzz)-1 @ Kzx
-
 
     Wt = torch.linalg.solve_triangular(L, Kzx, upper=False)  #(Lzz)-1 @ Kzx
-    W = torch.transpose(Wt, -2, -1) # Kxz@(Lzz)-1, shape # L x N x M
+    W = torch.transpose(Wt, -2, -1) # Kxz@(Lzz)-T, shape # L x N x M
     Lu = transform_to(self.constraint)(self.Lu) #shape L x M x M
     # S = Lu @ torch.transpose(Lu, -2, -1) # shape L x M x M
 
     # S = transform_to(self.constraint)(self.S)
 
-    cov_diag = torch.clamp(Kxx - torch.sum(W**2, dim=-1), min=0.0)
-    cov_diag = cov_diag + torch.sum((W@Lu**2), dim=-1)
+    if verbose:
+        print('calculating cov_diag')
+
+    cov_diag = Kxx - torch.sum(W**2, dim=-1)
+    cov_diag = torch.clamp(cov_diag, min=0.0)
+    cov_diag = cov_diag + torch.sum(((W@Lu)**2), dim=-1)
+
+    # cov_diag = torch.clamp(cov_diag, min=1e-4)
+
+    if verbose:
+      print('calculating mean')
 
     mean = W @ (self.mu.unsqueeze(-1))
     mean = torch.squeeze(mean)
     
+    if verbose:
+      print(torch.min(cov_diag))
+
     qF = distributions.Normal(mean, cov_diag ** 0.5)
     qZ = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
-    pZ = distributions.Normal(torch.zeros(), torch.ones())
+
+    pZ = distributions.MultivariateNormal(torch.zeros_like(self.Z[:,0]), scale_tril=torch.diag(torch.ones_like(self.Z[:,0])))
 
     return qF, qZ, pZ
   
@@ -450,3 +449,21 @@ class MGGP_SVGP(nn.Module):
     pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
 
     return qF, qU, pU
+  
+
+class MGGP_WSVGP(WSVGP):
+  def __init__(self, kernel, dim=1, M=50, n_groups=2, jitter=1e-4):
+    super().__init__(kernel, dim, M, jitter)
+    
+    self.groupsZ = nn.Parameter((torch.randint(0, n_groups, (M,))).type(torch.LongTensor), requires_grad=False)
+   
+  
+  def forward_kernels(self, X, Z, **args):
+
+    groupsX = args['groupsX']
+
+    Kxx = self.kernel(X, X, groupsX, groupsX, diag=True)
+    Kzx = self.kernel(self.Z, X, self.groupsZ, groupsX)
+    Kzz = self.kernel(self.Z, self.Z, self.groupsZ, self.groupsZ)
+
+    return Kxx, Kzx, Kzz
