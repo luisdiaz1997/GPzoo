@@ -5,7 +5,7 @@
       <paths name="pshrestha@beehive:22 agent">
         <serverdata>
           <mappings>
-            <mapping deploy="/vnngp" local="$PROJECT_DIR$" />
+            <mapping deploy="/vnngp/GPzoo" local="$PROJECT_DIR$" web="http://" />
           </mappings>
         </serverdata>
       </paths>
