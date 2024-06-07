@@ -11,6 +11,18 @@ from math import ceil
 import matplotlib.pyplot as plt
 
 
+
+def whitened_KL(mz, Lz):
+
+    Lz_diag = torch.diag(Lz)
+    log_Lz_diag = torch.log(Lz_diag)
+
+    M = len(mz)
+
+    kl_term = -2*torch.sum(log_Lz_diag) + torch.sum(Lz_diag**2) + torch.sum(mz**2) - M
+
+    return 0.5*kl_term
+
 def init_softplus(mat, minval= 1e-5):
     mat2 = mat.copy()
     mask = mat2<20

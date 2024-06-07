@@ -78,7 +78,7 @@ class batched_MGGP_RBF(batched_RBF):
 
     group_dist = torch.sum((group_embedding1 - group_embedding2) ** 2)
 
-    val = 1/(self.group_diff_param * group_dist + 1)
+    val = 1/(torch.abs(self.group_diff_param) * group_dist + 1)
 
     return (self.sigma**2)*torch.exp(-0.5*dist_scaled*val)*(val**(0.5*p))
 

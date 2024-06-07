@@ -338,7 +338,7 @@ class WSVGP(nn.Module):
     
     return self.kernel(X, Z, **args)
   
-  def forward_kernels(self, X, Z, **args):
+  def forward_kernels(self, X, **args):
 
     Kxx = self.kernel(X, X, diag=True)  #shape L x N
     Kzx = self.kernel(self.Z, X) #shape L x M x N
@@ -351,7 +351,7 @@ class WSVGP(nn.Module):
     if verbose:
       print('calculating kernels')
 
-    Kxx, Kzx, Kzz = self.forward_kernels(X, self.Z, **args)
+    Kxx, Kzx, Kzz = self.forward_kernels(X, **args)
     Kzz = add_jitter(Kzz, self.jitter)
 
     if verbose:
@@ -390,8 +390,8 @@ class WSVGP(nn.Module):
     qF = distributions.Normal(mean, cov_diag ** 0.5)
     qZ = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
 
-    pZ = distributions.MultivariateNormal(torch.zeros_like(self.Z[:,0]), scale_tril=torch.diag(torch.ones_like(self.Z[:,0])))
-
+    # pZ = distributions.MultivariateNormal(torch.zeros_like(self.Z[:,0]), scale_tril=torch.diag(torch.ones_like(self.Z[:,0])))
+    pZ = None
     return qF, qZ, pZ
   
 
@@ -458,12 +458,91 @@ class MGGP_WSVGP(WSVGP):
     self.groupsZ = nn.Parameter((torch.randint(0, n_groups, (M,))).type(torch.LongTensor), requires_grad=False)
    
   
-  def forward_kernels(self, X, Z, **args):
+  def forward_kernels(self, X, **args):
 
     groupsX = args['groupsX']
-
     Kxx = self.kernel(X, X, groupsX, groupsX, diag=True)
     Kzx = self.kernel(self.Z, X, self.groupsZ, groupsX)
-    Kzz = self.kernel(self.Z, self.Z, self.groupsZ, self.groupsZ)
+    Kzz = self.kernel(self.Z, self.Z, self.groupsZ, self.groupsZ).contiguous()
 
     return Kxx, Kzx, Kzz
+  
+
+class batched_WSVGP(nn.Module):
+  def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
+    super().__init__()
+    self.kernel = kernel
+    self.jitter = jitter
+    
+    self.Z = nn.Parameter(torch.randn((M, dim))) #choose random inducing points
+   
+    self.Lu = nn.Parameter(torch.randn((M,M)))
+    self.mu = nn.Parameter(torch.zeros((M,)))
+    self.constraint = constraints.lower_cholesky
+
+
+  def kernel_forward(self, X, Z, **args):
+    
+    return self.kernel(X, Z, **args)
+  
+  def forward_kernels(self, X, idx, **args):
+
+   
+    X = X[idx]
+    Z = self.Z[idx]
+    Kxx = self.kernel(X, X, diag=True)  #shape L x N
+    Kzz = self.kernel(Z, Z).contiguous() #shape L x M x M
+
+    return Kxx, Kzz, Kzz
+
+  def forward(self, X, idx, verbose=False, **args):
+
+    if verbose:
+      print('calculating kernels')
+
+    Kxx, Kzx, Kzz = self.forward_kernels(X, idx, **args)
+    Kzz = add_jitter(Kzz, self.jitter)
+
+    if verbose:
+      print('calculating cholesky')
+    L = torch.linalg.cholesky(Kzz) #shape L x M x M
+   
+    if verbose:
+        print('calculating W')
+   
+
+    Wt = torch.linalg.solve_triangular(L, Kzx, upper=False)  #(Lzz)-1 @ Kzx
+    W = torch.transpose(Wt, -2, -1) # Kxz@(Lzz)-T, shape # L x N x M
+    Lu = transform_to(self.constraint)(self.Lu) #shape L x M x M
+
+    Lu = Lu[:, idx]
+    # S = Lu @ torch.transpose(Lu, -2, -1) # shape L x M x M
+
+    # S = transform_to(self.constraint)(self.S)
+
+    if verbose:
+        print('calculating cov_diag')
+
+    cov_diag = Kxx - torch.sum(W**2, dim=-1)
+    cov_diag = torch.clamp(cov_diag, min=0.0)
+    cov_diag = cov_diag + torch.sum(((W@Lu)**2), dim=-1)
+
+    # cov_diag = torch.clamp(cov_diag, min=1e-4)
+
+    if verbose:
+      print('calculating mean')
+
+    mu = mu[:, idx]
+
+    mean = W @ (mu.unsqueeze(-1))
+    mean = torch.squeeze(mean)
+    
+    if verbose:
+      print(torch.min(cov_diag))
+
+    qF = distributions.Normal(mean, cov_diag ** 0.5)
+    qZ = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
+
+    pZ = distributions.MultivariateNormal(torch.zeros_like(self.Z[idx,0]), scale_tril=torch.diag(torch.ones_like(self.Z[idx,0])))
+
+    return qF, qZ, pZ
