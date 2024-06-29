@@ -62,7 +62,7 @@ class batched_MGGP_RBF(batched_RBF):
   def __init__(self, sigma=1.0, lengthscale=1.0, group_diff_param=1.0, n_groups=10):
     super().__init__(sigma, lengthscale)
 
-    self.group_diff_param = nn.Parameter(torch.tensor(lengthscale))
+    self.group_diff_param = nn.Parameter(torch.tensor(group_diff_param))
     group_distances = torch.ones(n_groups) - torch.eye(n_groups)
     self.embedding = nn.Parameter(_embed_distance_matrix(group_distances), requires_grad=False)
 
@@ -86,6 +86,8 @@ class batched_MGGP_RBF(batched_RBF):
   def forward(self, X, Z, groupsX, groupsZ, diag=False):
     
     if diag:
+      if self.sigma.dim() < 1:
+        return (self.sigma**2).expand(X.size(0))
       return (self.sigma**2).unsqueeze(-1).expand(-1, X.size(0))
     
 
