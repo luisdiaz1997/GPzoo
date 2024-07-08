@@ -57,11 +57,10 @@ class VNNGP(nn.Module):
     Lu = transform_to(self.constraint)(self.Lu)
     Lu_shape = Lu.shape
     Lu = Lu.contiguous().view(-1, Lu_shape[-2], Lu_shape[-1]) # ... x M x M
-
-    L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter)) # ... x M x M
     indexes = torch.argsort(distances, dim=1)[:, :self.K]
 
     if lkzz_build == 0: # cholesky decomposition
+      L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter)) # ... x M x M
       L_shape = L.shape
       L = L.contiguous().view(-1, L_shape[-2], L_shape[-1]) # ... x M x M
 
@@ -156,7 +155,9 @@ class VNNGP(nn.Module):
 
     qF = distributions.Normal(mean, torch.clamp(cov, min=5e-2) ** 0.5)
     qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
-    pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
+    #pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
+    #pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), covariance_matrix=Kzz)
+    pU = cov, mean
 
     return qF, qU, pU
 

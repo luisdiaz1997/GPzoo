@@ -22,7 +22,7 @@ def smooth_spatial_factors(F,Z,X=None):
   Z: inducing point locations
   X: spatial coordinates
   """
-  M = Z.shape[0]
+  M = len(m)
   if X is None: #no spatial coordinates, just use the mean
     beta0 = F.mean(axis=0)
     U = np.tile(beta0,[M,1])
@@ -200,29 +200,6 @@ def anndata_to_train_val(ad, layer=None, nfeat=None, train_frac=0.95,
 def scanpy_sizefactors(Y):
     sz = Y.sum(axis=1,keepdims=True)
     return sz/np.median(sz)
-
-def dims_autocorr(factors,coords,sort=True):
-    """
-    factors: (num observations) x (num latent dimensions) array
-    coords: (num observations) x (num spatial dimensions) array
-    sort: if True (default), returns the index and I statistics in decreasing
-    order of autocorrelation. If False, returns the index and I statistics
-    according to the ordering of factors.
-
-    returns: an integer array of length (num latent dims), "idx"
-    and a numpy array containing the Moran's I values for each dimension
-
-    indexing factors[:,idx] will sort the factors in decreasing order of spatial
-    autocorrelation.
-    """
-    ad = AnnData(X=factors,obsm={"spatial":coords})
-    spatial_neighbors(ad)
-    df = spatial_autocorr(ad,mode="moran",copy=True)
-    if not sort: #revert to original sort order
-        df.sort_index(inplace=True)
-    
-    idx = np.array([int(i) for i in df.index])
-    return idx,df["I"].to_numpy()
 
 def lnormal_approx_dirichlet(L):
     """

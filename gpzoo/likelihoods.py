@@ -189,9 +189,6 @@ class Hybrid_NSF(NSF):
       # scale_pF = torch.nn.functional.softplus(self.scale_pF)
 
       qF2 = distributions.Normal(self.mF, scale_qF)
-
-
-      
       F = qF.rsample((E,)) #shape ExLxN
       F2 = qF2.rsample((E,))
 
