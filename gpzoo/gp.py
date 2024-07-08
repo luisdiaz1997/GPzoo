@@ -117,6 +117,31 @@ class VNNGP(nn.Module):
       little_Kzz_shape = little_Kzz.shape
       little_Kzz = little_Kzz.contiguous().view(-1, little_Kzz_shape[-2], little_Kzz_shape[-1])  # ( ... x N) x K x K
 
+    elif lkzz_build == 3:
+      if verbose:
+          print("Running new lkzz code")
+          print("Directly constructing little_Kzz")
+
+      N = X.shape[0]
+      K = self.K
+      L = Kzz.shape[0]
+      lkzz = np.zeros((L, N, K, K))  # L x N x K x K
+    
+      for l in range(Kzz.shape[0]):
+          for n in range(N):
+              idx = indexes[n]
+              if verbose:
+                  print("Kzz[l, idx][:, idx] shape: ", (Kzz[l, idx][:, idx]).shape)
+              
+              llkzz = Kzz[l, idx][:, idx]  # extracts Kzz[l, idx, idx]
+              if verbose:
+                  print("lkzz shape: ", lkzz.shape)
+              lkzz[l, n, :, :] = llkzz.cpu().numpy()
+
+      little_Kzz = torch.tensor(lkzz, device=Kzz.device).float()
+      little_Kzz_shape = little_Kzz.shape
+      little_Kzz = little_Kzz.contiguous().view(-1, little_Kzz_shape[-2], little_Kzz_shape[-1])  # ( ... x N) x K x K
+
     kzz_inv = torch.inverse(add_jitter(little_Kzz, self.jitter)) # (... x N) x KxK
 
     expanded = indexes.repeat(Kxx_shape[0], 1)
