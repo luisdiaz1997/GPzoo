@@ -72,7 +72,7 @@ class NSF2(PoissonFactorization):
   
 
   def forward_batched(self, X, idx, E=10, verbose=False, **kwargs):
-    qF, qU, pU = self.prior(X=X[idx], verbose=verbose, **kwargs)
+    qF, qU, pU = self.prior(X=X[idx], verbose=verbose, kwargs=kwargs['kwargs'])
     F = qF.rsample((E,))
     Z = self.get_rate(F)
     V = torch.nn.functional.softplus(self.V[idx])

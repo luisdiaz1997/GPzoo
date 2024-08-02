@@ -3,6 +3,7 @@ from torch import distributions
 from torch.distributions import constraints, transform_to
 import torch.nn as nn
 from .utilities import add_jitter, svgp_forward, reshape_param
+import numpy as np
 
 class VNNGP(nn.Module):
   def __init__(self, kernel, dim=1, M=50, K=3, jitter=1e-4):
@@ -22,7 +23,8 @@ class VNNGP(nn.Module):
     #print("Mu: Shape ", self.mu.shape)
 
 
-  def forward(self, X, verbose=False, lkzz_build=0):
+  def forward(self, X, verbose=False, **kwargs):
+    lkzz_build = kwargs['kwargs']['lkzz_build']
     Kxx = self.kernel(X, X, diag=True)
     Kxx_shape = Kxx.shape
     Kxx = Kxx.contiguous().view(-1, 1) # (... x N) x 1
@@ -59,6 +61,7 @@ class VNNGP(nn.Module):
     Lu = Lu.contiguous().view(-1, Lu_shape[-2], Lu_shape[-1]) # ... x M x M
     indexes = torch.argsort(distances, dim=1)[:, :self.K]
 
+    little_Kzz = None
     if lkzz_build == 0: # cholesky decomposition
       L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter)) # ... x M x M
       L_shape = L.shape
@@ -68,7 +71,6 @@ class VNNGP(nn.Module):
         print("indexes.shape: ", indexes.shape)
         print('calculating L')
         print('L.shape', L.shape)
-
 
       indexes = torch.argsort(distances, dim=1)[:, :self.K]
       little_L = L[:, indexes] # ... x N x K x M
@@ -81,71 +83,19 @@ class VNNGP(nn.Module):
       little_Kzz = little_Kzz.contiguous().view(-1, little_Kzz_shape[-2], little_Kzz_shape[-1]) # ( ... x N) x K x K
     
     elif lkzz_build == 1: # indexing with np.arange into Kzz
-      jitter = 1e-6
-      Kzz_jittered = Kzz + jitter * torch.eye(Kzz.shape[-1], device=Kzz.device)
-
-      batch_size = Kzz_jittered.shape[:-2]
-      N = indexes.shape[-2]
-      K = indexes.shape[-1]
-
-      # gather appropriate submatrices
-      batch_indices = torch.arange(batch_size[0], device=Kzz.device).view(-1, 1, 1)
-      little_L = Kzz_jittered[batch_indices, indexes]
-
-      little_Kzz = little_L @ torch.transpose(little_L, -2, -1)
-
-      little_Kzz_shape = little_Kzz.shape
-      little_Kzz = little_Kzz.contiguous().view(-1, little_Kzz_shape[-2], little_Kzz_shape[-1])
-
-      if verbose:
-        print("little_Kzz_shape before contiguous(): ", little_Kzz_shape)
-        print("little_Kzz: ", little_Kzz.shape)
-
-    
-    elif lkzz_build == 2:
-      # Directly construct little_Kzz
-      def construct_little_Kzz(Z, indexes):
-          def kernel_func(i):
-              return self.kernel(Z[i], Z[i])
-          return torch.vmap(kernel_func)(indexes)
-          
-      little_Kzz = construct_little_Kzz(self.Z, indexes)
-
-      if verbose:
-          print('Little_Kzz.shape:', little_Kzz.shape)
-
-      little_Kzz_shape = little_Kzz.shape
-      little_Kzz = little_Kzz.contiguous().view(-1, little_Kzz_shape[-2], little_Kzz_shape[-1])  # ( ... x N) x K x K
-
-    elif lkzz_build == 3:
       if verbose:
           print("Running new lkzz code")
           print("Directly constructing little_Kzz")
 
-      N = X.shape[0]
-      K = self.K
-      L = Kzz.shape[0]
-      lkzz = np.zeros((L, N, K, K))  # L x N x K x K
-    
-      for l in range(Kzz.shape[0]):
-          for n in range(N):
-              idx = indexes[n]
-              if verbose:
-                  print("Kzz[l, idx][:, idx] shape: ", (Kzz[l, idx][:, idx]).shape)
-              
-              llkzz = Kzz[l, idx][:, idx]  # extracts Kzz[l, idx, idx]
-              if verbose:
-                  print("lkzz shape: ", lkzz.shape)
-              lkzz[l, n, :, :] = llkzz.cpu().numpy()
-
-      little_Kzz = torch.tensor(lkzz, device=Kzz.device).float()
+      # Extract the required submatrices using advanced indexing
+      little_Kzz = torch.vmap(lambda x: Kzz[:, x][:, :, x])(indexes)
+      little_Kzz = little_Kzz.transpose(0,1)
+      little_Kzz = torch.tensor(little_Kzz, device=Kzz.device).float()
       little_Kzz_shape = little_Kzz.shape
       little_Kzz = little_Kzz.contiguous().view(-1, little_Kzz_shape[-2], little_Kzz_shape[-1])  # ( ... x N) x K x K
 
     kzz_inv = torch.inverse(add_jitter(little_Kzz, self.jitter)) # (... x N) x KxK
-
     expanded = indexes.repeat(Kxx_shape[0], 1)
-
     little_Kxz = torch.gather(Kxz, 1, expanded)[:, None, :] #(... x N)x1xK
     
     W = little_Kxz  @ kzz_inv # (... x N) x 1 x K # issue is here

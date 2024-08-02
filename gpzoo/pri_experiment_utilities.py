@@ -127,18 +127,6 @@ def init_softplus(mat, minval= 1e-5):
 
     return mat2
 
-def reverse_init_softplus(mat2, minval=1e-5):
-    mat = mat2.copy()
-    mask = mat < 20
-    exp_val = np.log(mat[mask]) + 1 - minval
-    
-    # Ensure exp_val is large enough to avoid log of non-positive values
-   #exp_val = np.maximum(exp_val, 1 + minval)
-    
-    mat[mask] = np.exp(exp_val)
-    
-    return mat
-
 
 def load_visium():
     adata = sq.datasets.visium_hne_adata()
@@ -171,8 +159,9 @@ def load_slideseq():
     Y = Dtr['Y'].T
     Y = Y[~adata.var.MT]
     X = Dtr['X']*50.0
+    V = Dtr['sz']
     
-    return X, Y
+    return X, (Y/V.squeeze())
     
 def preloaded_nmf_factors(path):
     nmf_results = torch.load(path)
@@ -186,15 +175,6 @@ def inducing_points_cluster_centers(X, M, random_state=256):
     
 def build_model(X, Y, loadings=None, factors=None, model_type=None, **kwargs):
     """
-    Parameters:
-    X:
-        - torch.Size([N, D])
-    Y:
-        - torch.Size([L, N])
-    loadings:
-        - torch.Size([L, K])
-    factors:
-        - torch.Size([N, L])
     """
     V = scanpy_sizefactors(Y.T)
     kwargs = kwargs['kwargs']
@@ -242,10 +222,9 @@ def buil_pnmf(Y, L):
     model.to(device)
 
 def model_grads(model):
-    model.prior.kernel.sigma.requires_grad = False
-
-    model.prior.kernel.lengthscale.requires_grad = False
-    model.prior.Z.requires_grad=False
+    model.prior.kernel.sigma.requires_grad = True
+    model.prior.kernel.lengthscale.requires_grad = True
+    model.prior.Z.requires_grad=True
     model.prior.mu.requires_grad=False
     model.prior.Lu.requires_grad=True
     model.W.requires_grad=True
@@ -312,9 +291,8 @@ def train(model, optimizer, y, device, steps=200, E=20, **kwargs):
     return losses, means, scales
 
 
-def train_new_KL_batched(model, optimizer, X, y, device, steps=200, E=20, verbose=False, batch_size=1000, **kwargs):
-    #kwargs = kwargs['kwargs']
-    #print(kwargs)
+def train_hybrid_batched(model, optimizer, X, y, device, steps=200, E=20, verbose=False, batch_size=1000, **kwargs):
+    kwargs = kwargs['kwargs']
     losses = []
     means = []
     scales = []
@@ -323,7 +301,7 @@ def train_new_KL_batched(model, optimizer, X, y, device, steps=200, E=20, verbos
     for it in tqdm(range(steps)):
         idx = torch.multinomial(torch.ones(X.shape[0]), num_samples=batch_size, replacement=False)
         optimizer.zero_grad()
-        pY, qF, qU, pU = model.forward_batched(X=X, idx=idx, E=E, verbose=verbose, **kwargs)
+        pY, _ , qU, pU, qF, pF = model.forward_batched(X=X, idx=idx, E=E, **kwargs)
         
         logpY = y[:, idx]*torch.log((pY.rate).cpu()) - (pY.rate).cpu()
 
@@ -347,7 +325,41 @@ def train_new_KL_batched(model, optimizer, X, y, device, steps=200, E=20, verbos
     return losses, means, scales, idxs
 
 
-def train_batched(model, optimizer, X, y, device, steps=200, E=20, batch_size=1000, L=10, **kwargs):
+def train_batched(model, optimizer, X, y, device, steps=200, E=20, verbose=False, batch_size=1000, **kwargs):
+    kwargs = kwargs['kwargs']
+    losses = []
+    means = []
+    scales = []
+    idxs = []
+
+    for it in tqdm(range(steps)):
+        idx = torch.multinomial(torch.ones(X.shape[0]), num_samples=batch_size, replacement=False)
+        optimizer.zero_grad()
+        pY, qF, qU, pU = model.forward_batched(X=X, idx=idx, E=E, verbose=verbose, kwargs=kwargs)
+        
+        logpY = y[:, idx]*torch.log(pY.rate) - (pY.rate)
+
+
+        ELBO = ((logpY).mean(axis=0).sum()).to(device)
+        ELBO -= torch.sum(torch.vmap(vnngp_kl)(qU.mean, qU.scale_tril, model.prior.Lu, model.prior.mu))
+
+        loss = -ELBO
+        loss.backward()
+        optimizer.step()
+
+        losses.append(loss.item())
+        if (it%10)==0:
+            means.append(torch.exp(qF.mean.detach().cpu()).numpy())
+            scales.append(qF.scale.detach().cpu().numpy())
+
+    with torch.no_grad():
+        if device.type=='cuda':
+            torch.cuda.empty_cache()
+
+    return losses, means, scales, idxs
+
+
+def train_batched_old(model, optimizer, X, y, device, steps=200, E=20, batch_size=1000, L=10, **kwargs):
     losses = []
     
     means = []
@@ -433,7 +445,7 @@ def run_experiment(data_func, save_path, steps=1000, batched=False, model_type=N
     
     start_time = time.time()
     losses, means, scales, idxs = train_new_KL_batched(model, optimizer, X_train, Y, device,
-                                                steps=steps, E=3, batch_size=kwargs['batch_size'])
+                                                steps=steps, E=3, batch_size=kwargs['batch_size'], kwargs=kwargs)
     end_time = time.time()
     
     final_time = end_time - start_time
@@ -465,14 +477,10 @@ def run_experiment(data_func, save_path, steps=1000, batched=False, model_type=N
 
 
 def run_validation_experiment(X, Y, save_path, steps=1000, batched=False, model_type=None, NMF=False, nmf_path=None, **kwargs):
-    X = np.array(X)
-    Y = np.array(Y)
     kwargs = kwargs['kwargs']
     file_path = model_type
-    #X, Y = data_func()
-    #K=None
+
     if model_type == 'VNNGP':
-        #K=kwargs['K']
         file_path += f"_K={kwargs['K']}"
 
         if kwargs['lkzz_build']:
@@ -489,11 +497,12 @@ def run_validation_experiment(X, Y, save_path, steps=1000, batched=False, model_
         # with NMF initialization
         file_path += f"_NMFinit"
         factors, loadings = preloaded_nmf_factors(nmf_path)
-        X = np.array(X)
-        moran_idx, moranI = dims_autocorr(factors, X)
+        X_array = np.array(X.cpu())
+        Y_array = np.array(Y.cpu())
+        moran_idx, moranI = dims_autocorr(factors, X_array)
         factors=factors[:, moran_idx]
         loadings=loadings[:, moran_idx]
-        model = build_model(X, Y, loadings=loadings, factors=factors, model_type=model_type, kwargs=kwargs)
+        model = build_model(X_array, Y_array, loadings=loadings, factors=factors, model_type=model_type, kwargs=kwargs)
     else:
         # without NMF initialization
         X = np.array(X)
@@ -503,16 +512,18 @@ def run_validation_experiment(X, Y, save_path, steps=1000, batched=False, model_
     model_grads(model)
     model.prior.jitter=kwargs['jtr']
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=kwargs['lr'])
-    
-    model.to(device)
+
     X = torch.tensor(X).type(torch.float)
     Y = torch.tensor(Y).type(torch.float)
     X_train = X.to(device)
     #Y_train = Y.to(device)
     
+    model.to(device)
+    X = torch.tensor(X, dtype=torch.float).to(device)
+    Y = torch.tensor(Y, dtype=torch.float).to(device)
     start_time = time.time()
-    losses, means, scales, idxs = train_new_KL_batched(model, optimizer, X_train, Y, device,
-                                                steps=steps, E=3, batch_size=kwargs['batch_size'])
+    losses, means, scales, idxs = train_batched(model, optimizer, X_train, Y, device,
+                                                steps=steps, E=3, batch_size=kwargs['batch_size'], kwargs=kwargs)
     end_time = time.time()
     
     final_time = end_time - start_time
@@ -531,16 +542,17 @@ def run_validation_experiment(X, Y, save_path, steps=1000, batched=False, model_
     #fig.close()
     
     size=2
-    fig, axes = plt.subplots(3, 5, figsize=(size*5, size*3), tight_layout=True)
+    rows = int(kwargs['L']/5)
+    fig, axes = plt.subplots(rows, 5, figsize=(size*5, size*rows), tight_layout=True)
     
     model.cpu()
-    qF, _, _ = model.prior(X)
+    qF, _, _ = model.prior(X.cpu(), kwargs=kwargs)
     mean = torch.exp(qF.mean).detach().numpy()
-    
-    plot_factors(mean, X, moran_idx=moran_idx, size=2, s=1, alpha=0.9, ax=axes)
-    fig.suptitle(f'Factors')
+    plot_factors(np.exp(mean), X.cpu().detach().numpy(), moran_idx=moran_idx, size=2, s=0.2, alpha=0.9, ax=axes)
+    fig.suptitle(f'Factors | sigma: {kwargs["sigma"]}, lengthscale: {kwargs["lengthscale"]}')
     fig.savefig(f'{save_path}/{file_path}_plot.png')
     #fig.close()
+
 
 
 def run_pnmf(X, Y, save_path, steps=1000, **kwargs):
@@ -577,15 +589,15 @@ def run_pnmf(X, Y, save_path, steps=1000, **kwargs):
     #fig.close()
     
     size=2
-    fig, axes = plt.subplots(3, 5, figsize=(size*5, size*3), tight_layout=True)
+    rows = kwargs["L"]//5
+    fig, axes = plt.subplots(rows, 5, figsize=(size*5, size*rows), tight_layout=True)
     
+                
     model.cpu()
-    qF, pF= model.prior()
+    qF, _, _ = model.prior(X.cpu(), kwargs=kwargs)
     mean = torch.exp(qF.mean).detach().numpy()
-    moran_idx, moranI = dims_autocorr(mean.T, X)
-    
-    plot_factors(mean, X, moran_idx=moran_idx, size=2, s=1, alpha=0.9, ax=axes)
-    fig.suptitle(f'Factors')
+    plot_factors(np.exp(mean), X.cpu().detach().numpy(), moran_idx=moran_idx, size=2, s=0.2, alpha=0.9, ax=axes)
+    fig.suptitle(f'Factors | sigma: {kwargs["sigma"]}, lengthscale: {kwargs["lengthscale"]}')
     fig.savefig(f'{save_path}/{file_path}_plot.png')
     #fig.close()
 
@@ -620,5 +632,38 @@ def plot_factors(factors, X, moran_idx=None, ax=None, size=7, alpha=0.8, s=0.1, 
         curr_ax.set_xticks([])
         curr_ax.set_yticks([])
         curr_ax.set_facecolor('xkcd:gray')
+
+
+def plot_factors_five(factors, X, moran_idx=None, ax=None, size=7, alpha=0.8, s=0.1, names=None):
+    max_val = np.percentile(factors, 95)
+    min_val = np.percentile(factors, 5)
+
+    
+    if moran_idx is not None:
+        factors = factors[moran_idx]
+        if names is not None:
+            names = names[moran_idx]
+
+    L = len(factors)
+
+    if ax is None:
+        fig, ax = plt.subplots(1, 5, figsize=(size*5, size*2), tight_layout=True)
+        
+    for i in range(L):
+        plt.subplot(1, 5, i+1)
+        
+        curr_ax = ax[i]
+        
+        curr_ax.scatter(X[:, 0], X[:,1], c=factors[i], vmin=min_val, vmax=max_val, alpha=alpha, cmap='turbo', s=s)
+
+        curr_ax.invert_yaxis()
+        if names is not None:
+            curr_ax.set_title(names[i], x=0.03, y=.88, fontsize="small", c="white",
+                     ha="left", va="top")
+        curr_ax.set_xticks([])
+        curr_ax.set_yticks([])
+        curr_ax.set_facecolor('xkcd:gray')
+
+
     
     
