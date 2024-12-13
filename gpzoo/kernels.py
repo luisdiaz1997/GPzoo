@@ -67,6 +67,11 @@ class batched_MGGP_RBF(batched_RBF):
     self.embedding = nn.Parameter(_embed_distance_matrix(group_distances), requires_grad=False)
 
 
+  def set_group_distances(self, group_distances):
+
+    self.embedding = nn.Parameter(_embed_distance_matrix(group_distances), requires_grad=False)
+
+
   def covariance(self, x1, x2, group_embedding1, group_embedding2):
 
     diff = x1-x2
@@ -158,6 +163,10 @@ class MGGP_RBF(RBF):
 
     group_distances = torch.ones(n_groups) - torch.eye(n_groups)
     self.embedding = _embed_distance_matrix(group_distances).to(device)
+
+  def set_group_distances(self, group_distances):
+
+    self.embedding = _embed_distance_matrix(group_distances)
 
 
   def forward(self, X, Z, groupsX, groupsZ, diag=False):

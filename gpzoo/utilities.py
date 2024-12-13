@@ -11,6 +11,18 @@ from math import ceil
 import matplotlib.pyplot as plt
 
 
+def build_group_distances(X, groupsX):
+    N = len(torch.unique(groupsX))
+    average_position = torch.zeros((N, 2), dtype=torch.float)
+    for i in range(N):
+        group_mask = groupsX==i
+        average_position[i] = torch.mean(X[group_mask])
+
+    distance_mat = torch.cdist(average_position, average_position)
+
+    return distance_mat
+
+    
 
 def whitened_KL(mz, Lz):
 
@@ -451,6 +463,7 @@ def _embed_distance_matrix(distance_matrix):
     C = torch.eye(N) - (1/N) *torch.ones(size=(N, N))
     B = -0.5*(C @ D2 @ C)
     L, Q = torch.linalg.eigh(B)
+    L[L < 0] = 0
     embedding = Q @ torch.diag(_torch_sqrt(L, 1e-6))
     return embedding
 
