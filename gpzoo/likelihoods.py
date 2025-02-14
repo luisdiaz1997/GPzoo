@@ -60,6 +60,7 @@ class NSF2(PoissonFactorization):
     super().__init__(prior=gp, y=y, L=L)
     D, N = y.shape
     self.V = nn.Parameter(torch.ones((N,)))
+    self.W = nn.Parameter(torch.rand((D, L)))
 
   def forward(self, X, E=10, verbose=False, **kwargs):
     qF, qU, pU = self.prior(X=X, verbose=verbose, **kwargs)
@@ -69,6 +70,29 @@ class NSF2(PoissonFactorization):
     pY = distributions.Poisson(V*Z)
 
     return pY, qF, qU, pU
+
+  def predict(self, X, X_val=None, E=10, **kwargs):
+    """
+    Predict mean counts for training and validation data.
+
+    Parameters:
+    - self: An instance of NSF2.
+    - X: Training data features.
+    - y: Training data targets (counts).
+    - X_val: Validation data features (optional).
+    - E: Number of samples for predictive mean.
+
+    Returns:
+    - Predicted means for training and (optionally) validation data.
+    """
+    pY, _, _ = self.prior(X=X, E=E, **kwargs)
+    Mu = torch.exp(pY.mean)
+    if X_val is not None:
+        pY_val, _, _ = self.prior(X=X_val, E=E, **kwargs)
+        Mu_val = torch.exp(pY_val.mean)
+    else:
+        Mu_val = None
+    return Mu, Mu_val
   
 
   def forward_batched(self, X, idx, E=10, verbose=False, **kwargs):
