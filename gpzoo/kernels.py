@@ -51,7 +51,8 @@ class batched_RBF(nn.Module):
   def forward(self, X, Z, diag=False):
     
     if diag:
-      return (self.sigma**2).unsqueeze(-1).expand(-1, X.size(0))
+      # return (self.sigma**2).unsqueeze(-1).expand(-1, X.size(0))
+      return (self.sigma**2).reshape(-1, 1).expand(len(self.sigma) if isinstance(self.sigma, torch.Tensor) and self.sigma.dim() > 0 else 1, *X.shape)
     
 
     result = torch.vmap(lambda x: torch.vmap(lambda y: self.covariance(x, y))(X))(Z)
@@ -79,7 +80,7 @@ class batched_MGGP_RBF(batched_RBF):
 
     dist_scaled = dist/(self.lengthscale**2)
 
-    p = x1.shape[-1]
+    p = x1.unsqueeze(0).shape[-1]
 
     group_dist = torch.sum((group_embedding1 - group_embedding2) ** 2)
 
@@ -91,11 +92,10 @@ class batched_MGGP_RBF(batched_RBF):
   def forward(self, X, Z, groupsX, groupsZ, diag=False):
     
     if diag:
-      if self.sigma.dim() < 1:
-        return (self.sigma**2).expand(X.size(0))
-      return (self.sigma**2).unsqueeze(-1).expand(-1, X.size(0))
+      # return (self.sigma**2).unsqueeze(-1).expand(-1, X.size(0))
+      return (self.sigma**2).reshape(-1, 1).expand(len(self.sigma) if isinstance(self.sigma, torch.Tensor) and self.sigma.dim() > 0 else 1, *X.shape)
     
-
+    
     group_embeddingsX = self.embedding[groupsX]
     group_embeddingsZ = self.embedding[groupsZ]
     

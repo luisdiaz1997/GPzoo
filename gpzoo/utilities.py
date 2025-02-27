@@ -26,12 +26,12 @@ def build_group_distances(X, groupsX):
 
 def whitened_KL(mz, Lz):
 
-    Lz_diag = torch.diag(Lz)
+    Lz_diag = torch.diagonal(Lz)
     log_Lz_diag = torch.log(Lz_diag)
 
     M = len(mz)
 
-    kl_term = -2*torch.sum(log_Lz_diag) + torch.sum(Lz_diag**2) + torch.sum(mz**2) - M
+    kl_term = -2*torch.sum(log_Lz_diag) + torch.sum(Lz**2) + torch.sum(mz**2) - M
 
     return 0.5*kl_term
 
@@ -391,6 +391,7 @@ def svgp_forward(Kxx: torch.Tensor, Kzz: torch.Tensor, W: torch.Tensor, inducing
     '''
     mean = W@ (inducing_mean.unsqueeze(-1))
     diff = inducing_cov-Kzz #shape L x M x M
+
     cov = Kxx + torch.sum((W @ diff)* W, dim=-1) #shape L x N
     
     return mean, cov
