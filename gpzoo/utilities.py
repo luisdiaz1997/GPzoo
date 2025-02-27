@@ -11,6 +11,38 @@ from math import ceil
 import matplotlib.pyplot as plt
 
 
+def build_group_distances(X, groupsX):
+    N = len(torch.unique(groupsX))
+    average_position = torch.zeros((N, 2), dtype=torch.float)
+    for i in range(N):
+        group_mask = groupsX==i
+        average_position[i] = torch.mean(X[group_mask])
+
+    distance_mat = torch.cdist(average_position, average_position)
+
+    return distance_mat
+
+    
+
+def whitened_KL(mz, Lz):
+
+    Lz_diag = torch.diagonal(Lz)
+    log_Lz_diag = torch.log(Lz_diag)
+
+    M = len(mz)
+
+    kl_term = -2*torch.sum(log_Lz_diag) + torch.sum(Lz**2) + torch.sum(mz**2) - M
+
+    return 0.5*kl_term
+
+def init_softplus(mat, minval= 1e-5):
+    mat2 = mat.copy()
+    mask = mat2<20
+    mat2[mask] = np.log(np.exp(mat2[mask])-1+minval)
+
+    return mat2
+
+
 '''
 code from original NSF paper https://github.com/willtownes/nsf-paper/tree/main
 '''
@@ -111,6 +143,7 @@ def dims_autocorr(factors,coords,sort=True):
     autocorrelation.
     """
     from anndata import AnnData
+    print('here_andata')
     from squidpy.gr import spatial_neighbors,spatial_autocorr
 
     ad = AnnData(X=factors,obsm={"spatial":coords})
@@ -200,28 +233,6 @@ def scanpy_sizefactors(Y):
     sz = Y.sum(axis=1,keepdims=True)
     return sz/np.median(sz)
 
-def dims_autocorr(factors,coords,sort=True):
-    """
-    factors: (num observations) x (num latent dimensions) array
-    coords: (num observations) x (num spatial dimensions) array
-    sort: if True (default), returns the index and I statistics in decreasing
-    order of autocorrelation. If False, returns the index and I statistics
-    according to the ordering of factors.
-
-    returns: an integer array of length (num latent dims), "idx"
-    and a numpy array containing the Moran's I values for each dimension
-
-    indexing factors[:,idx] will sort the factors in decreasing order of spatial
-    autocorrelation.
-    """
-    ad = AnnData(X=factors,obsm={"spatial":coords})
-    spatial_neighbors(ad)
-    df = spatial_autocorr(ad,mode="moran",copy=True)
-    if not sort: #revert to original sort order
-        df.sort_index(inplace=True)
-    
-    idx = np.array([int(i) for i in df.index])
-    return idx,df["I"].to_numpy()
 
 def lnormal_approx_dirichlet(L):
     """
@@ -380,6 +391,7 @@ def svgp_forward(Kxx: torch.Tensor, Kzz: torch.Tensor, W: torch.Tensor, inducing
     '''
     mean = W@ (inducing_mean.unsqueeze(-1))
     diff = inducing_cov-Kzz #shape L x M x M
+
     cov = Kxx + torch.sum((W @ diff)* W, dim=-1) #shape L x N
     
     return mean, cov
@@ -452,6 +464,7 @@ def _embed_distance_matrix(distance_matrix):
     C = torch.eye(N) - (1/N) *torch.ones(size=(N, N))
     B = -0.5*(C @ D2 @ C)
     L, Q = torch.linalg.eigh(B)
+    L[L < 0] = 0
     embedding = Q @ torch.diag(_torch_sqrt(L, 1e-6))
     return embedding
 
