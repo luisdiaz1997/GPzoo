@@ -4,6 +4,30 @@ from torch.distributions import constraints, transform_to
 import torch.nn as nn
 from .utilities import add_jitter, svgp_forward, reshape_param
 
+
+
+class BaseVGP(nn.Module):
+  def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
+    super().__init__()
+    self.kernel = kernel
+    self.jitter = jitter
+    
+    self.Z = nn.Parameter(torch.randn((M, dim))) #choose inducing points
+    self.Lu = nn.Parameter(torch.randn(M))
+    self.mu = nn.Parameter(torch.zeros((M,)))
+
+  def forward_kernels(self, X, diag=True, **kwargs):
+    Kxx = self.kernel(X, X, diag=diag)  # shape L x N
+    if not diag:
+        Kxx = Kxx.contiguous()
+
+    Kzx = self.kernel(self.Z, X)  # shape L x M x N
+    Kzz = self.kernel(self.Z, self.Z).contiguous()  # shape L x M x M
+
+    return Kxx, Kzx, Kzz
+
+
+
 class VNNGP(nn.Module):
   def __init__(self, kernel, dim=1, M=50, K=3, jitter=1e-4):
     super().__init__()
@@ -146,20 +170,16 @@ class GaussianPrior(nn.Module):
     return qF, pF
 
 
-class SVGP(nn.Module):
+
+class SVGP(BaseVGP):
   def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
-    super().__init__()
-    self.kernel = kernel
-    self.jitter = jitter
+    super().__init__(kernel, dim, M, jitter)
     
-    self.Z = nn.Parameter(torch.randn((M, dim))) #choose random inducing points
    
     self.precompute_distance = False
-    # self.S = nn.Parameter(torch.eye(M))
     self.Lu = nn.Parameter(torch.randn((M,M)))
-    self.mu = nn.Parameter(torch.zeros((M,)))
     self.constraint = constraints.lower_cholesky
-    # self.constraint = constraints.positive_definite
+
 
   def precompute_distance(self, X, idz):
 
@@ -168,101 +188,132 @@ class SVGP(nn.Module):
     self.distance = nn.Parameter(torch.cdist(X, self.Z)) #shape N x M
     self.idz = idz
 
-  def kernel_forward(self, X, Z, **args):
-    
-    return self.kernel(X, Z, **args)
-  
-  def forward_kernels(self, X, Z, **args):
+  def forward(self, X, diag=True, verbose=False):
+    if verbose:
+        print('calculating Kxx')
 
-    Kxx = self.kernel(X, X, diag=True)
-    Kzx = self.kernel(self.Z, X)
-    Kzz = self.kernel(self.Z, self.Z)
-
-    return Kxx, Kzx, Kzz
-
-  def forward(self, X, verbose=False):
+    Kxx = self.kernel(X, X, diag=diag)  # shape L x N (diag=True) or L x N x N (diag=False)
 
     if verbose:
-      print('calculating Kxx')
-
-    Kxx = self.kernel(X, X, diag=True) #shape L x N
-
-    if verbose:
-      print('calculating Kzx')
+        print('calculating Kzx')
 
     if self.precompute_distance:
-
-      Kzx = self.kernel.forward_distance(distance_squared=(self.distance.T)**2) #shape L x M x N
+        Kzx = self.kernel.forward_distance(distance_squared=(self.distance.T)**2)  # shape L x M x N
     else:
-      Kzx = self.kernel(self.Z, X) #shape L x M x N
+        Kzx = self.kernel(self.Z, X)  # shape L x M x N
 
     if verbose:
-      print('calculating kzz')
+        print('calculating Kzz')
 
     if self.precompute_distance:
-
-      Kzx_shape = Kzx.shape
-      Kzz = (Kzx.view(-1, Kzx_shape[-2], Kzx_shape[-1]))[:, :, self.idz]
-      Kzz = torch.squeeze(Kzz)
+        Kzx_shape = Kzx.shape
+        Kzz = (Kzx.view(-1, Kzx_shape[-2], Kzx_shape[-1]))[:, :, self.idz]
+        Kzz = torch.squeeze(Kzz)
     else:
-      Kzz = self.kernel_forward(self.Z, self.Z).contiguous() #shape L x M x M
-      Kzz = add_jitter(Kzz, self.jitter)
+        Kzz = self.kernel_forward(self.Z, self.Z).contiguous()  # shape L x M x M
+        Kzz = add_jitter(Kzz, self.jitter)
 
     if verbose:
-      print('calculating cholesky')
-    L = torch.linalg.cholesky(Kzz) #shape L x M x M
-   
+        print('calculating cholesky')
+    L = torch.linalg.cholesky(Kzz)  # shape L x M x M
+
     if verbose:
         print('calculating W')
-   
-    W = torch.cholesky_solve(Kzx, L) #(Kzz)-1 @ Kzx
-    W = torch.transpose(W, -2, -1) # Kxz@(Kzz)-1, shape # L x N x M
-    Lu = transform_to(self.constraint)(self.Lu) #shape L x M x M
-    S = Lu @ torch.transpose(Lu, -2, -1) # shape L x M x M
 
-    # S = transform_to(self.constraint)(self.S)
+    W = torch.cholesky_solve(Kzx, L)  # (Kzz)^-1 @ Kzx
+    W = torch.transpose(W, -2, -1)  # Kxz @ (Kzz)^-1, shape L x N x M
+    Lu = transform_to(self.constraint)(self.Lu)  # shape L x M x M
+    S = Lu @ torch.transpose(Lu, -2, -1)  # shape L x M x M
 
-    mean, cov_diag = svgp_forward(Kxx, Kzz, W, self.mu, S)
-    mean = torch.squeeze(mean)
-    
-    qF = distributions.Normal(mean, torch.clamp(cov_diag, min=1e-6) ** 0.5)
+    if diag:
+        mean, cov_diag = svgp_forward(Kxx, Kzz, W, self.mu, S)
+        mean = torch.squeeze(mean)
+        cov_diag = torch.clamp(cov_diag, min=1e-6)
+        qF = distributions.Normal(mean, cov_diag.sqrt())
+    else:
+        if verbose:
+            print('calculating full covariance')
+
+        # Optimized covariance computation
+        A = W  # W = K_{zx}^T K_{zz}^{-1} => shape: L x N x M
+        middle = Kzz - S  # L x M x M
+        cov = Kxx - A @ middle @ A.transpose(-2, -1)  # L x N x N
+        cov = cov.contiguous()
+        cov = add_jitter(cov, self.jitter)
+
+        # Cholesky decomposition for scale_tril
+        L_cov = torch.linalg.cholesky(cov)  # L x N x N
+        mean = torch.squeeze(W @ self.mu.unsqueeze(-1))  # L x N
+        qF = distributions.MultivariateNormal(mean, scale_tril=L_cov)
+
     qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
     pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
 
     return qF, qU, pU
   
 
-class WSVGP(nn.Module):
+class WSVGP(BaseVGP):
+  """Weighted Sparse Variational GP"""
   def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
-    super().__init__()
-    self.kernel = kernel
-    self.jitter = jitter
-    
-    self.Z = nn.Parameter(torch.randn((M, dim))) #choose random inducing points
-   
+    super().__init__(kernel, dim, M, jitter)
+
+
     self.Lu = nn.Parameter(torch.randn((M,M)))
-    self.mu = nn.Parameter(torch.zeros((M,)))
     self.constraint = constraints.lower_cholesky
 
-
-  def kernel_forward(self, X, Z, **args):
-    
-    return self.kernel(X, Z, **args)
   
-  def forward_kernels(self, X, **args):
+  def forward(self, X, diag=True, verbose=False, **kwargs):
+    if verbose:
+        print('→ Computing kernels')
 
-    Kxx = self.kernel(X, X, diag=True)  #shape L x N
-    Kzx = self.kernel(self.Z, X) #shape L x M x N
-    Kzz = self.kernel(self.Z, self.Z).contiguous() #shape L x M x M
+    Kxx, Kzx, Kzz = self.forward_kernels(X, diag=diag, **kwargs)
+    Kzz = add_jitter(Kzz, self.jitter)
 
-    return Kxx, Kzx, Kzz
+    if verbose:
+        print('→ Cholesky(Kzz)')
+    L = torch.linalg.cholesky(Kzz)
 
-  def forward(self, X, verbose=False, **args):
+    if verbose:
+        print('→ Solving for W')
+    Wt = torch.linalg.solve_triangular(L, Kzx, upper=False)
+    W = Wt.transpose(-2, -1)  # Shape: N x M
+
+    if verbose:
+        print('→ Computing mean')
+    mean = W @ self.mu.unsqueeze(-1)  # Shape: N x 1
+    mean = mean.squeeze(-1)           # Shape: N
+
+    Lu = transform_to(self.constraint)(self.Lu)
+
+    if diag:
+        if verbose:
+            print('→ Diagonal covariance')
+        cov_diag = Kxx - torch.sum(W**2, dim=-1)
+        cov_diag = torch.clamp(cov_diag, min=0.0)
+        cov_diag += torch.sum((W @ Lu) ** 2, dim=-1)
+        qF = distributions.Normal(mean, cov_diag.sqrt())
+    else:
+        if verbose:
+            print('→ Full covariance')
+        Kxzzx = W @ Wt
+        WLu = W @ Lu
+        cov = Kxx - Kxzzx + WLu @ WLu.transpose(-2, -1)
+        cov = add_jitter(cov, self.jitter)
+        L_cov = torch.linalg.cholesky(cov)
+        qF = distributions.MultivariateNormal(mean, scale_tril=L_cov)
+
+    qZ = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
+    pZ = None  # Prior can be defined later if needed
+
+    return qF, qZ, pZ
+
+  
+  def init_mean(self, X, mean, verbose=False, **args):
 
     if verbose:
       print('calculating kernels')
 
-    Kxx, Kzx, Kzz = self.forward_kernels(X, **args)
+    Kxx, Kzx, Kzz = self.forward_kernels(X, diag=False, **args)
     Kzz = add_jitter(Kzz, self.jitter)
 
     if verbose:
@@ -275,37 +326,17 @@ class WSVGP(nn.Module):
 
     Wt = torch.linalg.solve_triangular(L, Kzx, upper=False)  #(Lzz)-1 @ Kzx
     W = torch.transpose(Wt, -2, -1) # Kxz@(Lzz)-T, shape # L x N x M
-    Lu = transform_to(self.constraint)(self.Lu) #shape L x M x M
-    # S = Lu @ torch.transpose(Lu, -2, -1) # shape L x M x M
-
-    # S = transform_to(self.constraint)(self.S)
 
     if verbose:
-        print('calculating cov_diag')
+      print('W shape:', W.shape)
+      print('mean shape:', mean.shape)
 
-    cov_diag = Kxx - torch.sum(W**2, dim=-1)
-    cov_diag = torch.clamp(cov_diag, min=0.0)
-    cov_diag = cov_diag + torch.sum(((W@Lu)**2), dim=-1)
+    mu_init = torch.linalg.lstsq(W, mean).solution
 
-    # cov_diag = torch.clamp(cov_diag, min=1e-4)
+    return mu_init
 
-    if verbose:
-      print('calculating mean')
 
-    mean = W @ (self.mu.unsqueeze(-1))
-    mean = torch.squeeze(mean)
-    
-    if verbose:
-      print(torch.min(cov_diag))
-
-    qF = distributions.Normal(mean, cov_diag ** 0.5)
-    qZ = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
-
-    # pZ = distributions.MultivariateNormal(torch.zeros_like(self.Z[:,0]), scale_tril=torch.diag(torch.ones_like(self.Z[:,0])))
-    pZ = None
-    return qF, qZ, pZ
-
-  def forward_precomputed(self, W, **args):
+  def forward_precomputed(self, W, **kwargs):
 
     Lu = transform_to(self.constraint)(self.Lu) #shape L x M x M
 
@@ -323,8 +354,6 @@ class WSVGP(nn.Module):
 
 
 
-
-  
 
 class MGGP_SVGP(nn.Module):
   def __init__(self, kernel, dim=1, M=50, jitter=1e-4, n_groups=2):
@@ -381,20 +410,56 @@ class MGGP_SVGP(nn.Module):
 
     return qF, qU, pU
   
+     
+class MGGP:
+  def __init__(self, n_groups, M):
+    self.groupsZ = nn.Parameter(
+        torch.randint(0, n_groups, (M,)).type(torch.LongTensor), 
+        requires_grad=False
+    )
 
-class MGGP_WSVGP(WSVGP):
-  def __init__(self, kernel, dim=1, M=50, n_groups=2, jitter=1e-4):
-    super().__init__(kernel, dim, M, jitter)
+  def forward_kernels(self, X, diag, **kwargs):
+    groupsX = kwargs['groupsX']
+    Kxx = self.kernel(X, X, groupsX, groupsX, diag=diag)
+    if not diag:
+      Kxx = Kxx.contiguous()
     
-    self.groupsZ = nn.Parameter((torch.randint(0, n_groups, (M,))).type(torch.LongTensor), requires_grad=False)
-   
-  
-  def forward_kernels(self, X, **args):
-
-    groupsX = args['groupsX']
-    Kxx = self.kernel(X, X, groupsX, groupsX, diag=True)
     Kzx = self.kernel(self.Z, X, self.groupsZ, groupsX)
     Kzz = self.kernel(self.Z, self.Z, self.groupsZ, self.groupsZ).contiguous()
 
     return Kxx, Kzx, Kzz
+
+
+def MGGPWrapper(BaseGPClass):
+    class MGGPModel(MGGP, BaseGPClass):
+        def __init__(self, kernel, dim=1, M=50, jitter=1e-4, n_groups=2):
+            BaseGPClass.__init__(self, kernel, dim, M, jitter)
+            MGGP.__init__(self, n_groups, M)
+    MGGPModel.__name__ = f"MGGP_{BaseGPClass.__name__}"
+    return MGGPModel
+
+    
+
+
   
+# class MGGP_WSVGP(WSVGP):
+#   def __init__(self, kernel, dim=1, M=50, n_groups=2, jitter=1e-4):
+#     super().__init__(kernel, dim, M, jitter)
+    
+#     self.groupsZ = nn.Parameter((torch.randint(0, n_groups, (M,))).type(torch.LongTensor), requires_grad=False)
+   
+  
+#   def forward_kernels(self, X, diag, **kwargs):
+
+#     groupsX = kwargs['groupsX']
+#     Kxx = self.kernel(X, X, groupsX, groupsX, diag=diag)
+#     if not diag:
+#       Kxx = Kxx.contiguous()
+    
+#     Kzx = self.kernel(self.Z, X, self.groupsZ, groupsX)
+#     Kzz = self.kernel(self.Z, self.Z, self.groupsZ, self.groupsZ).contiguous()
+
+#     return Kxx, Kzx, Kzz
+  
+
+

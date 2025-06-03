@@ -30,7 +30,33 @@ class batched_Matern32(nn.Module):
     return torch.transpose(result, -1, 0)
   
 
+class BatchedBrownianKernel(nn.Module):
+    def __init__(self, sigma=1.0):
+        super().__init__()
+        self.sigma = nn.Parameter(torch.tensor(sigma))
 
+    def covariance(self, x1, x2):
+        # Assume x1, x2 are 1D tensors of the same shape (D,)
+        # min(x1, x2) applied elementwise, then summed
+        minval = torch.minimum(x1, x2)
+        return (self.sigma**2) * minval.sum()
+
+    def forward(self, X, Z, diag=False):
+        """
+        X: (N, D) - e.g., points where we're evaluating
+        Z: (M, D) - e.g., inducing points
+        Returns: (M, N) kernel matrix
+        """
+        if diag:
+            return (self.sigma**2).reshape(-1, 1).expand(
+                len(self.sigma) if self.sigma.dim() > 0 else 1, len(X)
+            )
+
+        result = torch.vmap(lambda z: torch.vmap(lambda x: self.covariance(z, x))(X))(Z)
+        return result.transpose(-1, 0)
+    
+
+    
 class batched_RBF(nn.Module):
   def __init__(self, sigma=1.0, lengthscale=2.0):
     super().__init__()
@@ -52,7 +78,7 @@ class batched_RBF(nn.Module):
     
     if diag:
       # return (self.sigma**2).unsqueeze(-1).expand(-1, X.size(0))
-      return (self.sigma**2).reshape(-1, 1).expand(len(self.sigma) if isinstance(self.sigma, torch.Tensor) and self.sigma.dim() > 0 else 1, *X.shape)
+      return (self.sigma**2).reshape(-1, 1).expand(len(self.sigma) if isinstance(self.sigma, torch.Tensor) and self.sigma.dim() > 0 else 1, len(X))
     
 
     result = torch.vmap(lambda x: torch.vmap(lambda y: self.covariance(x, y))(X))(Z)
@@ -93,7 +119,7 @@ class batched_MGGP_RBF(batched_RBF):
     
     if diag:
       # return (self.sigma**2).unsqueeze(-1).expand(-1, X.size(0))
-      return (self.sigma**2).reshape(-1, 1).expand(len(self.sigma) if isinstance(self.sigma, torch.Tensor) and self.sigma.dim() > 0 else 1, *X.shape)
+      return (self.sigma**2).reshape(-1, 1).expand(len(self.sigma) if isinstance(self.sigma, torch.Tensor) and self.sigma.dim() > 0 else 1, len(X))
     
     
     group_embeddingsX = self.embedding[groupsX]

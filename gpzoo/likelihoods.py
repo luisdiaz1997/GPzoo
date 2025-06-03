@@ -88,7 +88,8 @@ class NSF2(PoissonFactorization):
   
 
   def forward_batched(self, X, idx, E=10, verbose=False, **kwargs):
-    qF, qU, pU = self.prior(X=X[idx], verbose=verbose, **kwargs)
+    '''X should be batched already, this is just for V'''
+    qF, qU, pU = self.prior(X=X, verbose=verbose, **kwargs)
     F = qF.rsample((E,))
     Z = self.get_rate(F)
     V = torch.nn.functional.softplus(self.V[idx])
