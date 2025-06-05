@@ -399,7 +399,9 @@ class SVGP(WSVGP):
     Lu = mu.reshape(-1, M, M)  # Flatten batch dimensions for solving
 
     # Solve the linear system L @ X = rhs, where rhs = [mu, Lu]
-    # stack my and Lu soShape: [..., M, mu_batch_shape + M*Lu_batch_shape]
+    # Copilot, stack my and Lu so Shape: [..., M, mu_batch_shape + M*Lu_batch_shape] 
+    
+    
 
 
 
