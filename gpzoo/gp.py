@@ -2,7 +2,7 @@ import torch
 from torch import distributions
 from torch.distributions import constraints, transform_to
 import torch.nn as nn
-from .utilities import add_jitter, svgp_forward, reshape_param
+from .utilities import add_jitter, svgp_forward, reshape_param, whitened_KL
 
 
 
@@ -25,6 +25,21 @@ class BaseVGP(nn.Module):
     Kzz = self.kernel(self.Z, self.Z).contiguous()  # shape L x M x M
 
     return Kxx, Kzx, Kzz
+  
+  def kl_divergence(self, qZ, pZ=None):
+
+    if pZ is None:
+      mean, scale_tril = qZ.mean, qZ.scale_tril
+      batch_shape = qZ.mean.shape[:-1]
+      M = qZ.mean.shape[-1]
+      mean_flat = mean.reshape(-1, M)
+      scale_tril_flat = scale_tril.reshape(-1, M, M)
+      kl_flat = torch.vmap(whitened_KL)(mean_flat, scale_tril_flat)
+      kl_term = kl_flat.reshape(batch_shape)
+    else:
+      kl_term = distributions.kl_divergence(qZ, pZ)
+
+    return kl_term
 
 
 
@@ -171,95 +186,100 @@ class GaussianPrior(nn.Module):
 
 
 
-class SVGP(BaseVGP):
-  def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
-    super().__init__(kernel, dim, M, jitter)
+# class SVGP(BaseVGP):
+#   def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
+#     super().__init__(kernel, dim, M, jitter)
     
    
-    self.precompute_distance = False
-    self.Lu = nn.Parameter(torch.randn((M,M)))
-    self.constraint = constraints.lower_cholesky
+#     self.precompute_distance = False
+#     self.Lu = nn.Parameter(torch.randn((M,M)))
+#     self.constraint = constraints.lower_cholesky
 
 
-  def precompute_distance(self, X, idz):
+#   def precompute_distance(self, X, idz):
 
-    self.precompute_distance = True
-    self.Z = nn.Parameter(X[idz], requires_grad=False)
-    self.distance = nn.Parameter(torch.cdist(X, self.Z)) #shape N x M
-    self.idz = idz
+#     self.precompute_distance = True
+#     self.Z = nn.Parameter(X[idz], requires_grad=False)
+#     self.distance = nn.Parameter(torch.cdist(X, self.Z)) #shape N x M
+#     self.idz = idz
 
-  def forward(self, X, diag=True, verbose=False):
-    if verbose:
-        print('calculating Kxx')
+#   def forward(self, X, diag=True, verbose=False):
+#     if verbose:
+#         print('calculating Kxx')
 
-    Kxx = self.kernel(X, X, diag=diag)  # shape L x N (diag=True) or L x N x N (diag=False)
+#     Kxx = self.kernel(X, X, diag=diag)  # shape L x N (diag=True) or L x N x N (diag=False)
 
-    if verbose:
-        print('calculating Kzx')
+#     if verbose:
+#         print('calculating Kzx')
 
-    if self.precompute_distance:
-        Kzx = self.kernel.forward_distance(distance_squared=(self.distance.T)**2)  # shape L x M x N
-    else:
-        Kzx = self.kernel(self.Z, X)  # shape L x M x N
+#     if self.precompute_distance:
+#         Kzx = self.kernel.forward_distance(distance_squared=(self.distance.T)**2)  # shape L x M x N
+#     else:
+#         Kzx = self.kernel(self.Z, X)  # shape L x M x N
 
-    if verbose:
-        print('calculating Kzz')
+#     if verbose:
+#         print('calculating Kzz')
 
-    if self.precompute_distance:
-        Kzx_shape = Kzx.shape
-        Kzz = (Kzx.view(-1, Kzx_shape[-2], Kzx_shape[-1]))[:, :, self.idz]
-        Kzz = torch.squeeze(Kzz)
-    else:
-        Kzz = self.kernel_forward(self.Z, self.Z).contiguous()  # shape L x M x M
-        Kzz = add_jitter(Kzz, self.jitter)
+#     if self.precompute_distance:
+#         Kzx_shape = Kzx.shape
+#         Kzz = (Kzx.view(-1, Kzx_shape[-2], Kzx_shape[-1]))[:, :, self.idz]
+#         Kzz = torch.squeeze(Kzz)
+#     else:
+#         Kzz = self.kernel_forward(self.Z, self.Z).contiguous()  # shape L x M x M
+#         Kzz = add_jitter(Kzz, self.jitter)
 
-    if verbose:
-        print('calculating cholesky')
-    L = torch.linalg.cholesky(Kzz)  # shape L x M x M
+#     if verbose:
+#         print('calculating cholesky')
+#     L = torch.linalg.cholesky(Kzz)  # shape L x M x M
 
-    if verbose:
-        print('calculating W')
+#     if verbose:
+#         print('calculating W')
 
-    W = torch.cholesky_solve(Kzx, L)  # (Kzz)^-1 @ Kzx
-    W = torch.transpose(W, -2, -1)  # Kxz @ (Kzz)^-1, shape L x N x M
-    Lu = transform_to(self.constraint)(self.Lu)  # shape L x M x M
-    S = Lu @ torch.transpose(Lu, -2, -1)  # shape L x M x M
+#     W = torch.cholesky_solve(Kzx, L)  # (Kzz)^-1 @ Kzx
+#     W = torch.transpose(W, -2, -1)  # Kxz @ (Kzz)^-1, shape L x N x M
+#     Lu = transform_to(self.constraint)(self.Lu)  # shape L x M x M
+#     S = Lu @ torch.transpose(Lu, -2, -1)  # shape L x M x M
 
-    if diag:
-        mean, cov_diag = svgp_forward(Kxx, Kzz, W, self.mu, S)
-        mean = torch.squeeze(mean)
-        cov_diag = torch.clamp(cov_diag, min=1e-6)
-        qF = distributions.Normal(mean, cov_diag.sqrt())
-    else:
-        if verbose:
-            print('calculating full covariance')
+#     if diag:
+#         mean, cov_diag = svgp_forward(Kxx, Kzz, W, self.mu, S)
+#         mean = torch.squeeze(mean)
+#         cov_diag = torch.clamp(cov_diag, min=1e-6)
+#         qF = distributions.Normal(mean, cov_diag.sqrt())
+#     else:
+#         if verbose:
+#             print('calculating full covariance')
 
-        # Optimized covariance computation
-        A = W  # W = K_{zx}^T K_{zz}^{-1} => shape: L x N x M
-        middle = Kzz - S  # L x M x M
-        cov = Kxx - A @ middle @ A.transpose(-2, -1)  # L x N x N
-        cov = cov.contiguous()
-        cov = add_jitter(cov, self.jitter)
+#         # Optimized covariance computation
+#         A = W  # W = K_{zx}^T K_{zz}^{-1} => shape: L x N x M
+#         middle = Kzz - S  # L x M x M
+#         cov = Kxx - A @ middle @ A.transpose(-2, -1)  # L x N x N
+#         cov = cov.contiguous()
+#         cov = add_jitter(cov, self.jitter)
 
-        # Cholesky decomposition for scale_tril
-        L_cov = torch.linalg.cholesky(cov)  # L x N x N
-        mean = torch.squeeze(W @ self.mu.unsqueeze(-1))  # L x N
-        qF = distributions.MultivariateNormal(mean, scale_tril=L_cov)
+#         # Cholesky decomposition for scale_tril
+#         L_cov = torch.linalg.cholesky(cov)  # L x N x N
+#         mean = torch.squeeze(W @ self.mu.unsqueeze(-1))  # L x N
+#         qF = distributions.MultivariateNormal(mean, scale_tril=L_cov)
 
-    qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
-    pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
+#     qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
+#     pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
 
-    return qF, qU, pU
+#     return qF, qU, pU
   
 
 class WSVGP(BaseVGP):
-  """Weighted Sparse Variational GP"""
+  """Whitened Sparse Variational GP"""
   def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
     super().__init__(kernel, dim, M, jitter)
 
-
     self.Lu = nn.Parameter(torch.randn((M,M)))
     self.constraint = constraints.lower_cholesky
+
+  def transform_variables(self, L):
+    """Transform the parameters to ensure the correct constraints."""
+    Lu = transform_to(self.constraint)(self.Lu)
+    mu = self.mu
+    return mu, Lu
 
   
   def forward(self, X, diag=True, verbose=False, **kwargs):
@@ -271,19 +291,19 @@ class WSVGP(BaseVGP):
 
     if verbose:
         print('→ Cholesky(Kzz)')
-    L = torch.linalg.cholesky(Kzz)
+    L = torch.linalg.cholesky(Kzz) # Shape: L x M x M
 
     if verbose:
         print('→ Solving for W')
-    Wt = torch.linalg.solve_triangular(L, Kzx, upper=False)
-    W = Wt.transpose(-2, -1)  # Shape: N x M
+    Wt = torch.linalg.solve_triangular(L, Kzx, upper=False)  # (L)^-1 @ Kzx, Shape: L x M x N
+    W = Wt.transpose(-2, -1)  # Kxz @ (L)^-T, Shape: L x N x M
+    
+    mu, Lu = self.transform_variables(L)
 
     if verbose:
         print('→ Computing mean')
-    mean = W @ self.mu.unsqueeze(-1)  # Shape: N x 1
+    mean = W @ mu.unsqueeze(-1)  # Shape: N x 1
     mean = mean.squeeze(-1)           # Shape: N
-
-    Lu = transform_to(self.constraint)(self.Lu)
 
     if diag:
         if verbose:
@@ -303,9 +323,13 @@ class WSVGP(BaseVGP):
         qF = distributions.MultivariateNormal(mean, scale_tril=L_cov)
 
     qZ = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
-    pZ = None  # Prior can be defined later if needed
-
-    return qF, qZ, pZ
+    M = self.mu.shape[-1]
+    eye = torch.eye(M, device=self.mu.device).expand_as(self.Lu)
+    pZ = distributions.MultivariateNormal(
+        torch.zeros_like(self.mu), scale_tril=eye
+    )
+    return qF, qZ, pZ   
+     
 
   
   def init_mean(self, X, mean, verbose=False, **args):
@@ -351,64 +375,44 @@ class WSVGP(BaseVGP):
     qZ = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
     pZ = None
     return qF, qZ, pZ
+  
 
+class SVGP(WSVGP):
+  def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
+    super().__init__(kernel, dim, M, jitter)
 
+  def transform_variables(self, L):
+    """Transform the parameters to ensure the correct constraints."""
 
-
-class MGGP_SVGP(nn.Module):
-  def __init__(self, kernel, dim=1, M=50, jitter=1e-4, n_groups=2):
-    super().__init__()
-    self.kernel = kernel
-    self.jitter = jitter
-        
-    self.Z = nn.Parameter(torch.randn((M, dim))) #choose inducing points
-    self.groupsZ = nn.Parameter((torch.randint(0, n_groups, (M,))).type(torch.LongTensor), requires_grad=False)
-    self.Lu = nn.Parameter(torch.randn((M, M)))
-    self.mu = nn.Parameter(torch.zeros((M,)))
-    self.constraint = constraints.lower_cholesky
-
-  def forward(self, X, groupsX, verbose=False):
-    if verbose:
-      print('calculating Kxx')
-    Kxx = self.kernel(X, X, groupsX, groupsX, diag=True)
-
-    if verbose:
-      print('calculating Kzx')
-    Kzx = self.kernel(self.Z, X, self.groupsZ, groupsX)
-
-    if verbose:
-      print('calculating kzz')
-    Kzz = self.kernel(self.Z, self.Z, self.groupsZ, self.groupsZ)
-    Kzz = Kzz.contiguous()
-
-    if verbose:
-      print(Kzz.shape)
-
-    if verbose:
-      print('calculating cholesky')
-    L = torch.linalg.cholesky(add_jitter(Kzz, self.jitter))
-   
-    if verbose:
-        print('calculating W')
-   
-    W = torch.cholesky_solve(Kzx, L) #(Kzz)-1 @ Kzx
-    # Kzz_inv = torch.cholesky_inverse(L)
-    # W = Kzz_inv @ Kzx
-    W = torch.transpose(W, -2, -1)# Kxz@(Kzz)-1
     Lu = transform_to(self.constraint)(self.Lu)
-    S = Lu @ torch.transpose(Lu, -2, -1)
+    mu = self.mu
+
+    mu_batch_shape = mu.shape[:-1]
+    Lu_batch_shape = Lu.shape[:-2]
+    M = mu.shape[-1]
+
+    # Reshape mu and Lu to ensure they are compatible for solving
+    mu = mu.reshape(*mu_batch_shape, M, 1)  # Shape: [..., M, 1]
+    Lu = Lu.reshape(*Lu_batch_shape, M, M)  # Shape: [..., M, M]
+
+    mu = mu.reshape(-1, M, 1)  # Flatten batch dimensions for solving
+    Lu = mu.reshape(-1, M, M)  # Flatten batch dimensions for solving
+
+    # Solve the linear system L @ X = rhs, where rhs = [mu, Lu]
+    # stack my and Lu soShape: [..., M, mu_batch_shape + M*Lu_batch_shape]
+
+
+
+    # rhs = torch.cat([mu.unsqueeze(-1), Lu], dim=-1)
+    # X = torch.linalg.solve_triangular(L, rhs, upper=False)  # [..., M, 1 + M]
+
     
+    mu = torch.linalg.solve_triangular(L, mu, upper=False) # L^-1 @ mu, Shape: L x M
+    Lu = torch.linalg.solve_triangular(L, Lu, upper=False) # L^-1 @ Lu, Shape: L x M x M
+    # mu = X[..., 0]  # Extract the first column as mu
+    # Lu = X[..., 1:]  # Extract the rest as Lu
 
-    mean, cov_diag = svgp_forward(Kxx, Kzz, W, self.mu, S)
-    mean = torch.squeeze(mean)
-    cov_diag = torch.squeeze(cov_diag)
-
-
-    qF = distributions.Normal(mean, torch.clamp(cov_diag, min=5e-2) ** 0.5) #setting max cov_diag to 100, need to find a way to clip values manually later
-    qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
-    pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
-
-    return qF, qU, pU
+    return mu, Lu
   
      
 class MGGP:
@@ -437,6 +441,10 @@ def MGGPWrapper(BaseGPClass):
             MGGP.__init__(self, n_groups, M)
     MGGPModel.__name__ = f"MGGP_{BaseGPClass.__name__}"
     return MGGPModel
+
+
+MGGP_WSVGP = MGGPWrapper(WSVGP)
+MGGP_SVGP = MGGPWrapper(SVGP)
 
     
 
