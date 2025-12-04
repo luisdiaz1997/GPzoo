@@ -1,0 +1,27 @@
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+
+# Spatial transcriptomics and data analysis
+scanpy>=1.9.0
+squidpy>=1.2.0
+anndata>=0.9.0
+scikit-learn>=1.3.0
+
+# Training and visualization
+tensorboard>=2.13.0
+tqdm>=4.65.0
+
+# Optional: for specific datasets
+# scvi-tools>=1.0.0  # For scVI integration if needed
+# cell2location>=1.0.0  # For cell type deconvolution
+
+# Development dependencies (optional)
+# black>=23.0.0
+# flake8>=6.0.0
+# mypy>=1.0.0
+# pytest>=7.0.0
