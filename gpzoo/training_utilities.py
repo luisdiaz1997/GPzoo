@@ -95,6 +95,7 @@ def train_svgp_batched_with_tracking(
     writer: Optional[SummaryWriter] = None,
     progress_desc: str = "SVGP",
     image_log_every: Optional[int] = None,
+    scheduler=None,
 ) -> Tuple[List[float], List, List, List]:
     losses, means, scales, idxs = [], [], [], []
     N = len(X)
@@ -126,6 +127,8 @@ def train_svgp_batched_with_tracking(
 
         loss.backward()
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
         losses.append(loss.item())
 
         if writer is not None and it % 10 == 0:
@@ -183,6 +186,7 @@ def train_vnngp_batched_with_tracking(
     writer: Optional[SummaryWriter] = None,
     progress_desc: str = "VNNGP",
     image_log_every: Optional[int] = None,
+    scheduler=None,
 ) -> Tuple[List[float], List, List, List]:
     losses, means, scales, idxs = [], [], [], []
     N = len(X)
@@ -219,6 +223,8 @@ def train_vnngp_batched_with_tracking(
 
         loss.backward()
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
         losses.append(loss.item())
 
         if writer is not None and it % 10 == 0:
@@ -272,6 +278,7 @@ def train_mggp_svgp_with_tracking(
     writer: Optional[SummaryWriter] = None,
     progress_desc: str = "MGGP-SVGP",
     image_log_every: Optional[int] = None,
+    scheduler=None,
 ):
     losses, means, scales, idxs = [], [], [], []
     N = len(X)
@@ -304,6 +311,8 @@ def train_mggp_svgp_with_tracking(
 
         loss.backward()
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
         losses.append(loss.item())
 
         if writer is not None and it % 10 == 0:
@@ -357,6 +366,7 @@ def train_mggp_vnngp_with_tracking(
     writer: Optional[SummaryWriter] = None,
     progress_desc: str = "MGGP-VNNGP",
     image_log_every: Optional[int] = None,
+    scheduler=None,
 ):
     losses, means, scales, idxs = [], [], [], []
     N = len(X)
@@ -396,6 +406,8 @@ def train_mggp_vnngp_with_tracking(
 
         loss.backward()
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
         losses.append(loss.item())
 
         if writer is not None and it % 10 == 0:

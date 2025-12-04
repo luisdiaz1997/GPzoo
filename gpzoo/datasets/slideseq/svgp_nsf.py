@@ -130,7 +130,11 @@ def _train_main() -> None:
     if scale_params:
         param_groups.append({"params": scale_params, "lr": LR_SCALE})
 
-    optimizer = optim.Adam(param_groups)
+    # Use AdamW with weight decay for better regularization
+    optimizer = optim.AdamW(param_groups, weight_decay=1e-4)
+
+    # Add CosineAnnealingLR scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=STEPS, eta_min=LR*0.01)
 
     save_path = checkpoint_path
     result = run_training(
@@ -152,6 +156,7 @@ def _train_main() -> None:
         progress_desc="SVGP (slideseq)",
         image_log_every=IMAGE_LOG_EVERY,
         start_step=start_step,
+        scheduler=scheduler,
     )
 
     writer.close()
