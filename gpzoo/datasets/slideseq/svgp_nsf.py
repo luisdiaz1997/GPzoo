@@ -6,15 +6,8 @@ import numpy as np
 import torch
 from torch import optim
 
-from gpzoo.kernels import batched_Matern32
-from gpzoo.model_utilities import build_nsf_svgp
+from gpzoo.models import SVGP_NSF
 from torch.utils.tensorboard import SummaryWriter
-
-
-def _fallback_inducing(X: torch.Tensor, num_inducing: int) -> torch.Tensor:
-    if num_inducing <= 0:
-        raise ValueError("num_inducing must be positive.")
-    return X[:num_inducing].clone()
 
 
 def create_model(
@@ -36,11 +29,9 @@ def create_model(
 ):
     """Build or resume a vanilla SVGP NSF model for Slideseq."""
 
-    kernel_cfg = {"sigma": 1.0, "lengthscale": lengthscale}
-    if kernel_kwargs:
-        kernel_cfg.update(dict(kernel_kwargs))
-    kernel_cfg["lengthscale"] = lengthscale
-    kernel = batched_Matern32(**kernel_cfg)
+    sigma = 1.0
+    if kernel_kwargs and "sigma" in kernel_kwargs:
+        sigma = kernel_kwargs["sigma"]
 
     if state_dict is not None and inducing_points is None:
         try:
@@ -48,18 +39,15 @@ def create_model(
         except KeyError as exc:
             raise KeyError("Checkpoint is missing prior.Z needed for SVGP resume.") from exc
 
-    if inducing_points is None:
-        if num_inducing is None:
-            num_inducing = min(4000, X.shape[0])
-        inducing_points = _fallback_inducing(X, num_inducing)
-
-    return build_nsf_svgp(
+    return SVGP_NSF(
         X=X,
         Y=Y,
         V=V,
         L=L,
-        kernel=kernel,
+        lengthscale=lengthscale,
+        sigma=sigma,
         jitter=jitter,
+        num_inducing=num_inducing,
         inducing_points=inducing_points,
         lu_rank=lu_rank,
         lu_init_iters=lu_init_iters,

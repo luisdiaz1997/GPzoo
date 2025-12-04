@@ -6,15 +6,8 @@ import numpy as np
 import torch
 from torch import optim
 
-from gpzoo.kernels import batched_MGGP_RBF
-from gpzoo.model_utilities import build_mggp_nsf_svgp, init_mggp_inducing_points
+from gpzoo.models import MGGP_SVGP_NSF
 from torch.utils.tensorboard import SummaryWriter
-
-
-def _infer_groups(groupsX: torch.Tensor) -> int:
-    if groupsX.numel() == 0:
-        raise ValueError("groupsX must contain at least one value.")
-    return int(groupsX.detach().max().item()) + 1
 
 
 def create_model(
@@ -42,13 +35,11 @@ def create_model(
     if groupsX is None:
         raise ValueError("groupsX is required for MGGP models.")
 
-    n_groups = _infer_groups(groupsX)
-    kernel_cfg = {"sigma": 1.0, "lengthscale": lengthscale, "group_diff_param": 10.0}
+    sigma = 1.0
+    group_diff_param = 10.0
     if kernel_kwargs:
-        kernel_cfg.update(dict(kernel_kwargs))
-    kernel_cfg["lengthscale"] = lengthscale
-    kernel_cfg.setdefault("n_groups", n_groups)
-    kernel = batched_MGGP_RBF(**kernel_cfg)
+        sigma = kernel_kwargs.get("sigma", sigma)
+        group_diff_param = kernel_kwargs.get("group_diff_param", group_diff_param)
 
     if state_dict is not None:
         if inducing_points is None:
@@ -62,30 +53,22 @@ def create_model(
             except KeyError as exc:
                 raise KeyError("Checkpoint missing prior.groupsZ for MGGP SVGP.") from exc
 
-    if inducing_points is None or inducing_groups is None:
-        if num_inducing is None:
-            num_inducing = min(4000, X.shape[0])
-        inducing_points, inducing_groups = init_mggp_inducing_points(
-            X,
-            groupsX,
-            num_inducing,
-            method=inducing_init_method,
-            seed=inducing_seed,
-            allocation=inducing_allocation,
-        )
-
-    return build_mggp_nsf_svgp(
+    return MGGP_SVGP_NSF(
         X=X,
-        groupsX=groupsX,
         Y=Y,
+        groupsX=groupsX,
         V=V,
         L=L,
-        kernel=kernel,
+        lengthscale=lengthscale,
+        sigma=sigma,
+        group_diff_param=group_diff_param,
         jitter=jitter,
+        num_inducing=num_inducing,
         inducing_points=inducing_points,
         inducing_groups=inducing_groups,
+        inducing_method=inducing_init_method,
         device=device,
-        seed=seed,
+        seed=seed or inducing_seed,
     )
 
 

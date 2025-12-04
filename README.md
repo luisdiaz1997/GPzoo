@@ -48,26 +48,89 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
 ## Quick Start
 
-### Training a Model
+GPzoo provides three ways to create models, from simplest to most flexible:
+
+### Option 1: Convenience Classes (Recommended)
+
+The simplest way to get started. These classes handle all initialization automatically:
+
+```python
+from gpzoo.models import SVGP_NSF, VNNGP_NSF, MGGP_SVGP_NSF, MGGP_VNNGP_NSF
+
+# Load your spatial data
+X, Y = load_your_data()  # X: (N, 2) coordinates, Y: (genes, N) counts
+
+# Standard SVGP for medium-sized datasets
+model = SVGP_NSF(X, Y, L=12, lengthscale=8.0)
+
+# VNNGP for large datasets (100k+ cells)
+model = VNNGP_NSF(X, Y, L=12, K=50, lengthscale=8.0)
+
+# Multi-group models for cell type-aware analysis
+model = MGGP_SVGP_NSF(X, Y, groupsX, L=12, lengthscale=8.0)
+model = MGGP_VNNGP_NSF(X, Y, groupsX, L=12, K=50, lengthscale=8.0)
+
+# Move to GPU and train
+model.to("cuda")
+```
+
+### Option 2: Registry-Based (Dataset-Specific Configs)
+
+Use `build_model` with dataset-specific configurations:
 
 ```python
 from gpzoo.models import build_model
 
-# Load your spatial data (X: coordinates, Y: gene counts)
-X, Y = load_your_data()
-
-# Build and train an SVGP model
-model, _ = build_model(
+model, metadata = build_model(
     "slideseq/svgp_nsf",
     X=X,
     Y=Y,
-    L=10,  # number of latent factors
+    L=10,
     lengthscale=8.0,
     device="cuda"
 )
 
-# Or use the provided training scripts
+# Resume from checkpoint
+model, _ = build_model(
+    "slideseq/svgp_nsf",
+    checkpoint_path="models/slideseq_svgp.pth",
+    X=X, Y=Y, L=10, lengthscale=8.0
+)
+```
+
+### Option 3: Modular Components (Full Control)
+
+Build models from individual components for maximum flexibility:
+
+```python
+from gpzoo.kernels import batched_Matern32, batched_MGGP_RBF
+from gpzoo.gp import SVGP, VNNGP, MGGP_SVGP, MGGP_VNNGP
+from gpzoo.likelihoods import NSF2
+
+# 1. Choose a kernel
+kernel = batched_Matern32(sigma=1.0, lengthscale=8.0)
+# Or for multi-group:
+kernel = batched_MGGP_RBF(sigma=1.0, lengthscale=8.0, group_diff_param=10.0, n_groups=5)
+
+# 2. Choose a GP approximation
+gp = SVGP(kernel, M=1000)           # Sparse variational GP
+gp = VNNGP(kernel, M=N, K=50)       # Variational nearest neighbor GP
+gp = MGGP_SVGP(kernel, M=1000)      # Multi-group SVGP
+gp = MGGP_VNNGP(kernel, M=N, K=50)  # Multi-group VNNGP
+
+# 3. Wrap with likelihood model
+model = NSF2(gp, Y, L=12)
+```
+
+### Running Training Scripts
+
+Use the provided training scripts for each dataset:
+
+```bash
 python -m gpzoo.datasets.slideseq.svgp_nsf
+python -m gpzoo.datasets.slideseq.vnngp_nsf
+python -m gpzoo.datasets.slideseq.svgp_mggp_nsf
+python -m gpzoo.datasets.slideseq.vnngp_mggp_nsf
 ```
 
 ### Available Models
@@ -91,9 +154,12 @@ CUDA_VISIBLE_DEVICES=1 python -m gpzoo.datasets.slideseq.svgp_nsf &
 ```
 GPzoo/
 ├── gpzoo/                    # Main library
+│   ├── gp.py                # GP implementations (SVGP, VNNGP, MGGP_*)
 │   ├── kernels.py           # GP kernel implementations
-│   ├── likelihoods.py       # Likelihood functions
-│   ├── models.py            # Model registry and builder
+│   ├── likelihoods.py       # Likelihood functions (NSF2, Gaussian)
+│   ├── models/              # Model convenience classes and registry
+│   │   ├── nsf.py           # SVGP_NSF, VNNGP_NSF, MGGP_* classes
+│   │   └── registry.py      # build_model() and model registry
 │   ├── model_utilities.py   # Model construction utilities
 │   ├── training_utilities.py # Training loops and logging
 │   ├── utilities.py         # General utilities
@@ -179,34 +245,42 @@ tensorboard --logdir models/slideseq/tb/
 
 ### Custom Datasets
 ```python
-from gpzoo.models import build_model
+from gpzoo.models import SVGP_NSF, MGGP_VNNGP_NSF
+import torch
 
 # Your data: X (coordinates), Y (gene counts), groups (optional)
 X = torch.tensor(coordinates, dtype=torch.float32)
 Y = torch.tensor(gene_counts, dtype=torch.float32)
 groups = torch.tensor(cell_types, dtype=torch.long)  # for MGGP
 
-model, _ = build_model(
-    "slideseq/svgp_mggp_nsf",
-    X=X,
-    Y=Y,
-    groupsX=groups,
+# Simple model
+model = SVGP_NSF(X, Y, L=12, lengthscale=10.0)
+
+# Multi-group model
+model = MGGP_VNNGP_NSF(
+    X, Y, groups,
     L=12,
+    K=50,
     lengthscale=10.0,
-    device="cuda"
+    group_diff_param=10.0
 )
+model.to("cuda")
 ```
 
 ### Checkpoint Resumption
 ```python
-# Training resumes automatically if checkpoint exists
-model, _ = build_model(
+from gpzoo.models import build_model, load_checkpoint
+
+# Option 1: Via build_model (creates new model and loads weights)
+model, metadata = build_model(
     "slideseq/svgp_nsf",
     checkpoint_path="models/slideseq/slideseq_svgp.pth",
-    X=X,
-    Y=Y,
-    # ... other parameters
+    X=X, Y=Y, L=10, lengthscale=8.0
 )
+
+# Option 2: Load into existing model
+model = SVGP_NSF(X, Y, L=10, lengthscale=8.0)
+load_checkpoint(model, "models/slideseq/slideseq_svgp.pth")
 ```
 
 ### Hyperparameter Tuning

@@ -6,16 +6,9 @@ import numpy as np
 import torch
 from torch import optim
 
-from gpzoo.kernels import batched_MGGP_RBF
-from gpzoo.model_utilities import build_mggp_nsf_vnngp
+from gpzoo.models import MGGP_VNNGP_NSF
 from torch.utils.tensorboard import SummaryWriter
 from gpzoo.datasets.tenxvisium.config import GROUP_DIFF_PARAM
-
-
-def _infer_groups(groupsX: torch.Tensor) -> int:
-    if groupsX.numel() == 0:
-        raise ValueError("groupsX must contain at least one value.")
-    return int(groupsX.detach().max().item()) + 1
 
 
 def _infer_k(state_dict: Mapping[str, torch.Tensor]) -> Optional[int]:
@@ -51,13 +44,11 @@ def create_model(
     if groupsX is None:
         raise ValueError("groupsX is required for MGGP models.")
 
-    n_groups = _infer_groups(groupsX)
-    kernel_cfg = {"sigma": 1.0, "lengthscale": lengthscale, "group_diff_param": GROUP_DIFF_PARAM}
+    sigma = 1.0
+    group_diff_param = GROUP_DIFF_PARAM
     if kernel_kwargs:
-        kernel_cfg.update(dict(kernel_kwargs))
-    kernel_cfg["lengthscale"] = lengthscale
-    kernel_cfg.setdefault("n_groups", n_groups)
-    kernel = batched_MGGP_RBF(**kernel_cfg)
+        sigma = kernel_kwargs.get("sigma", sigma)
+        group_diff_param = kernel_kwargs.get("group_diff_param", group_diff_param)
 
     if state_dict is not None:
         if inducing_points is None:
@@ -78,29 +69,23 @@ def create_model(
     if K is None:
         K = 25
 
-    step = max(subset_step, 1)
-    if lu_reference_points is None:
-        lu_reference_points = X[::step]
-    if lu_reference_groups is None:
-        lu_reference_groups = groupsX[::step]
-
-    return build_mggp_nsf_vnngp(
+    return MGGP_VNNGP_NSF(
         X=X,
-        groupsX=groupsX,
         Y=Y,
+        groupsX=groupsX,
         V=V,
         L=L,
-        kernel=kernel,
-        jitter=jitter,
         K=K,
+        lengthscale=lengthscale,
+        sigma=sigma,
+        group_diff_param=group_diff_param,
+        jitter=jitter,
         inducing_points=inducing_points,
         inducing_groups=inducing_groups,
-        lu_reference_points=lu_reference_points,
-        lu_reference_groups=lu_reference_groups,
-        subset_step=step,
+        subset_step=subset_step,
+        precompute_knn=precompute_knn,
         device=device,
         seed=seed,
-        precompute_knn=precompute_knn,
     )
 
 

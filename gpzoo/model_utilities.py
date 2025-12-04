@@ -1,28 +1,19 @@
+"""Model utility functions for initialization and inducing point selection.
+
+This module provides helper functions used by the convenience model classes
+in gpzoo.models.nsf. For most users, the convenience classes (SVGP_NSF, etc.)
+are the recommended way to create models.
+"""
+
 import torch
-from torch import nn
 import numpy as np
 
 from typing import Optional
 from sklearn.cluster import KMeans
 
-from .kernels import (
-    batched_Matern32,
-    batched_MGGP_RBF,
-)
-from .gp import (
-    SVGP,
-    VNNGP,
-    MGGP_SVGP,
-    MGGP_VNNGP,
-)
-from .likelihoods import NSF2
-from .utilities import (
-    init_Lu_nsf,
-    init_Lu,
-)
-
 
 def _default_device(reference: torch.Tensor, device: Optional[torch.device]) -> torch.device:
+    """Determine the target device, defaulting to reference tensor's device."""
     if device is not None:
         return device
     if isinstance(reference, torch.Tensor):
@@ -31,12 +22,14 @@ def _default_device(reference: torch.Tensor, device: Optional[torch.device]) -> 
 
 
 def _ensure_tensor(value, *, dtype=None, device=None):
+    """Convert value to tensor if needed."""
     if isinstance(value, torch.Tensor):
         return value.to(device=device if device is not None else value.device, dtype=dtype)
     return torch.tensor(value, dtype=dtype, device=device)
 
 
 def _init_mu_from_lu(Lu_base: torch.Tensor, L: int, device: torch.device, seed: Optional[int] = None):
+    """Initialize mu from Lu base using random projection."""
     if seed is not None:
         torch.manual_seed(seed)
     rank = Lu_base.shape[-1]
@@ -66,6 +59,20 @@ def mggp_kmeans_inducing_points(
     n_init: int = 10,
     allocation: str = "proportional",
 ):
+    """Select inducing points using KMeans clustering per group.
+
+    Args:
+        X: Spatial coordinates, shape (N, D)
+        groupsX: Group assignments, shape (N,)
+        target_points: Total number of inducing points to select
+        seed: Random seed for KMeans
+        n_init: Number of KMeans initializations
+        allocation: "proportional" or "equal" allocation across groups
+
+    Returns:
+        Z: Inducing point coordinates
+        groupsZ: Group assignments for inducing points
+    """
     if target_points <= 0:
         raise ValueError("target_points must be positive.")
 
@@ -160,6 +167,20 @@ def init_mggp_inducing_points(
     seed: int = 123,
     **kwargs,
 ):
+    """Initialize inducing points for MGGP models.
+
+    Args:
+        X: Spatial coordinates
+        groupsX: Group assignments
+        num_inducing: Number of inducing points
+        method: "kmeans" or "random"
+        seed: Random seed
+        **kwargs: Additional arguments for the method
+
+    Returns:
+        Z: Inducing point coordinates
+        groupsZ: Group assignments for inducing points
+    """
     if method == "kmeans":
         return mggp_kmeans_inducing_points(
             X,
@@ -173,209 +194,3 @@ def init_mggp_inducing_points(
         idx = torch.randperm(len(X), device=X.device)[:num_inducing]
         return X[idx], groupsX[idx]
     raise ValueError(f"Unknown method '{method}' for init_mggp_inducing_points.")
-
-
-def build_nsf_svgp(
-    X: torch.Tensor,
-    Y: torch.Tensor,
-    V: Optional[torch.Tensor] = None,
-    *,
-    L: int = 4,
-    kernel=None,
-    jitter: float = 1e-5,
-    inducing_points: Optional[torch.Tensor] = None,
-    lu_rank: Optional[int] = None,
-    lu_init_iters: int = 10,
-    lu_use_cholesky: bool = True,
-    device: Optional[torch.device] = None,
-    seed: Optional[int] = None,
-):
-    kernel = kernel or batched_Matern32(sigma=1.0, lengthscale=0.3)
-    inducing = inducing_points if inducing_points is not None else X
-    inducing = inducing.clone()
-    M = inducing.shape[0]
-
-    gp = SVGP(kernel, M=M, jitter=jitter)
-    gp.Z = nn.Parameter(inducing, requires_grad=False)
-
-    rank = lu_rank or M
-    Lu_base = init_Lu_nsf(kernel, inducing, inducing, K=rank, niter=lu_init_iters,
-                          use_cholesky=lu_use_cholesky, jitter=jitter)
-    if Lu_base.dim() == 2:
-        Lu_base = Lu_base.unsqueeze(0)
-    Lu = Lu_base.expand(L, -1, -1).contiguous()
-    # Convert diagonal to log-space if using cholesky (apply_constraints will exp it back)
-    Lu_param = _log_diagonals(Lu) if lu_use_cholesky else Lu
-    gp.Lu = nn.Parameter(Lu_param.clone().detach())
-    gp.mu = nn.Parameter(_init_mu_from_lu(Lu_base.squeeze(0), L, gp.Lu.device, seed))
-
-    model = NSF2(gp, Y, L=L)
-    D = Y.shape[0]
-    model.W = nn.Parameter(torch.randn(D, L, device=Y.device, dtype=Y.dtype))
-
-    if V is None:
-        V = torch.ones(Y.shape[1], dtype=Y.dtype, device=Y.device)
-    model.V = nn.Parameter(V.clone())
-
-    target_device = _default_device(X, device)
-    model.to(target_device)
-    return model
-
-
-def build_nsf_vnngp(
-    X: torch.Tensor,
-    Y: torch.Tensor,
-    V: Optional[torch.Tensor] = None,
-    *,
-    L: int = 4,
-    kernel=None,
-    jitter: float = 1e-5,
-    K: int = 50,
-    inducing_points: Optional[torch.Tensor] = None,
-    lu_reference_points: Optional[torch.Tensor] = None,
-    subset_step: int = 10,
-    lu_rank: Optional[int] = None,
-    lu_init_iters: int = 10,
-    device: Optional[torch.device] = None,
-    seed: Optional[int] = None,
-    precompute_knn: bool = True,
-):
-    kernel = kernel or batched_Matern32(sigma=1.0, lengthscale=0.3)
-    inducing = inducing_points if inducing_points is not None else X
-    inducing = inducing.clone()
-
-    gp = VNNGP(kernel, M=inducing.shape[0], jitter=jitter, K=K)
-    gp.Z = nn.Parameter(inducing, requires_grad=True)
-
-    ref = lu_reference_points
-    if ref is None:
-        ref = X[::max(subset_step, 1)]
-    rank = lu_rank or K
-    Lu_base = init_Lu_nsf(kernel, X, ref, K=rank, niter=lu_init_iters)
-    if Lu_base.dim() == 2:
-        Lu_base = Lu_base.unsqueeze(0)
-    Lu = Lu_base.expand(L, -1, -1).contiguous()
-    gp.Lu = nn.Parameter(Lu.clone().detach())
-    gp.mu = nn.Parameter(_init_mu_from_lu(Lu_base.squeeze(0), L, gp.Lu.device, seed))
-
-    model = NSF2(gp, Y, L=L)
-    model.prior.K = K
-    D = Y.shape[0]
-    model.W = nn.Parameter(torch.randn(D, L, device=Y.device, dtype=Y.dtype))
-
-    if V is None:
-        V = torch.ones(Y.shape[1], dtype=Y.dtype, device=Y.device)
-    model.V = nn.Parameter(V.clone())
-
-    if precompute_knn:
-        knn_idx = model.prior.calculate_knn(X)[:, :-1]
-        model.prior.knn_idx = knn_idx
-        knn_idz = model.prior.calculate_knn(model.prior.Z)[:, 1:]
-        model.prior.knn_idz = knn_idz
-
-    target_device = _default_device(X, device)
-    model.to(target_device)
-    return model
-
-
-def build_mggp_nsf_svgp(
-    X: torch.Tensor,
-    groupsX: torch.Tensor,
-    Y: torch.Tensor,
-    V: Optional[torch.Tensor] = None,
-    *,
-    L: int = 10,
-    kernel=None,
-    jitter: float = 1e-5,
-    inducing_points: torch.Tensor,
-    inducing_groups: torch.Tensor,
-    lu_use_cholesky: bool = True,
-    device: Optional[torch.device] = None,
-    seed: Optional[int] = None,
-):
-    kernel = kernel or batched_MGGP_RBF(sigma=1.0, lengthscale=2.0, group_diff_param=10.0, n_groups=len(torch.unique(groupsX)))
-    Z = inducing_points.clone()
-    groupsZ = inducing_groups.clone()
-    M = Z.shape[0]
-
-    gp = MGGP_SVGP(kernel, M=M, n_groups=int(groupsZ.max().item() + 1), jitter=jitter)
-    gp.Z = nn.Parameter(Z, requires_grad=False)
-    gp.groupsZ = nn.Parameter(groupsZ, requires_grad=False)
-
-    Lu_base = init_Lu(kernel, gp.Z.detach(), gp.groupsZ.detach(), gp.Z.detach(), gp.groupsZ.detach(), K=M,
-                      use_cholesky=lu_use_cholesky, jitter=jitter)
-    if Lu_base.dim() == 2:
-        Lu_base = Lu_base.unsqueeze(0)
-    Lu = Lu_base.expand(L, -1, -1).contiguous()
-    # Convert diagonal to log-space if using cholesky (apply_constraints will exp it back)
-    Lu_param = _log_diagonals(Lu) if lu_use_cholesky else Lu
-    gp.Lu = nn.Parameter(Lu_param.clone().detach())
-    gp.mu = nn.Parameter(_init_mu_from_lu(Lu_base.squeeze(0), L, gp.Lu.device, seed))
-
-    model = NSF2(gp, Y, L=L)
-    D = Y.shape[0]
-    model.W = nn.Parameter(torch.randn(D, L, device=Y.device, dtype=Y.dtype))
-
-    if V is None:
-        V = torch.ones(Y.shape[1], dtype=Y.dtype, device=Y.device)
-    model.V = nn.Parameter(V.clone())
-
-    target_device = _default_device(X, device)
-    model.to(target_device)
-    return model
-
-
-def build_mggp_nsf_vnngp(
-    X: torch.Tensor,
-    groupsX: torch.Tensor,
-    Y: torch.Tensor,
-    V: Optional[torch.Tensor] = None,
-    *,
-    L: int = 10,
-    kernel=None,
-    jitter: float = 1e-5,
-    K: int = 50,
-    inducing_points: Optional[torch.Tensor] = None,
-    inducing_groups: Optional[torch.Tensor] = None,
-    lu_reference_points: Optional[torch.Tensor] = None,
-    lu_reference_groups: Optional[torch.Tensor] = None,
-    subset_step: int = 10,
-    device: Optional[torch.device] = None,
-    seed: Optional[int] = None,
-    precompute_knn: bool = True,
-):
-    kernel = kernel or batched_MGGP_RBF(sigma=1.0, lengthscale=2.0, group_diff_param=10.0, n_groups=int(groupsX.max().item() + 1))
-    Z = inducing_points.clone() if inducing_points is not None else X.clone()
-    groupsZ = inducing_groups.clone() if inducing_groups is not None else groupsX.clone()
-
-    gp = MGGP_VNNGP(kernel, M=Z.shape[0], n_groups=int(groupsZ.max().item() + 1), jitter=jitter, K=K)
-    gp.Z = nn.Parameter(Z, requires_grad=False)
-    gp.groupsZ = nn.Parameter(groupsZ, requires_grad=False)
-
-    ref_Z = lu_reference_points if lu_reference_points is not None else gp.Z.detach()[::max(subset_step, 1)]
-    ref_groups = lu_reference_groups if lu_reference_groups is not None else gp.groupsZ.detach()[::max(subset_step, 1)]
-    Lu_base = init_Lu(kernel, gp.Z.detach(), gp.groupsZ.detach(), ref_Z, ref_groups, K=K)
-    if Lu_base.dim() == 2:
-        Lu_base = Lu_base.unsqueeze(0)
-    Lu = Lu_base.expand(L, -1, -1).contiguous()
-    gp.Lu = nn.Parameter(Lu.clone().detach())
-    gp.mu = nn.Parameter(_init_mu_from_lu(Lu_base.squeeze(0), L, gp.Lu.device, seed))
-
-    model = NSF2(gp, Y, L=L)
-    model.prior.K = K
-    D = Y.shape[0]
-    model.W = nn.Parameter(torch.randn(D, L, device=Y.device, dtype=Y.dtype))
-
-    if V is None:
-        V = torch.ones(Y.shape[1], dtype=Y.dtype, device=Y.device)
-    model.V = nn.Parameter(V.clone())
-
-    if precompute_knn:
-        knn_idx = model.prior.calculate_knn(X).clone()[:, :-1]
-        model.prior.knn_idx = knn_idx
-        knn_idz = model.prior.calculate_knn(model.prior.Z).clone()[:, 1:]
-        model.prior.knn_idz = knn_idz
-
-    target_device = _default_device(X, device)
-    model.to(target_device)
-    return model

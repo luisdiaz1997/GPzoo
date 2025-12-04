@@ -6,8 +6,7 @@ import numpy as np
 import torch
 from torch import optim
 
-from gpzoo.kernels import batched_Matern32
-from gpzoo.model_utilities import build_nsf_vnngp
+from gpzoo.models import VNNGP_NSF
 from torch.utils.tensorboard import SummaryWriter
 
 
@@ -40,11 +39,9 @@ def create_model(
 ):
     """Build or resume a vanilla VNNGP NSF model for 10x Visium."""
 
-    kernel_cfg = {"sigma": 1.0, "lengthscale": lengthscale}
-    if kernel_kwargs:
-        kernel_cfg.update(dict(kernel_kwargs))
-    kernel_cfg["lengthscale"] = lengthscale
-    kernel = batched_Matern32(**kernel_cfg)
+    sigma = 1.0
+    if kernel_kwargs and "sigma" in kernel_kwargs:
+        sigma = kernel_kwargs["sigma"]
 
     if state_dict is not None and inducing_points is None:
         try:
@@ -59,26 +56,22 @@ def create_model(
     if K is None:
         K = 25
 
-    step = max(subset_step, 1)
-    if lu_reference_points is None:
-        lu_reference_points = X[::step]
-
-    return build_nsf_vnngp(
+    return VNNGP_NSF(
         X=X,
         Y=Y,
         V=V,
         L=L,
-        kernel=kernel,
-        jitter=jitter,
         K=K,
+        lengthscale=lengthscale,
+        sigma=sigma,
+        jitter=jitter,
         inducing_points=inducing_points,
-        lu_reference_points=lu_reference_points,
-        subset_step=step,
         lu_rank=lu_rank,
         lu_init_iters=lu_init_iters,
+        subset_step=subset_step,
+        precompute_knn=precompute_knn,
         device=device,
         seed=seed,
-        precompute_knn=precompute_knn,
     )
 
 
