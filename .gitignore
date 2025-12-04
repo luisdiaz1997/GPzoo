@@ -166,3 +166,14 @@ figures/
 jobs/
 *.pth
 *.pth.*
+
+# Data directories (large datasets, keep local only)
+notebooks/data/
+
+# Image files (figures, plots)
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.tif
+*.tiff
