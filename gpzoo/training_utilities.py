@@ -9,6 +9,54 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 
 
+def create_sequential_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    total_steps: int,
+    base_lr: float,
+    warmup_fraction: float = 0.2,
+    start_factor: float = 0.1,
+    min_lr: float = 3e-5,
+) -> torch.optim.lr_scheduler.OneCycleLR:
+    """
+    Create a OneCycleLR scheduler for aggressive training.
+
+    Args:
+        optimizer: The optimizer to schedule
+        total_steps: Total training steps
+        base_lr: Base learning rate (maximum LR during cycle) - only used as reference
+        warmup_fraction: Fraction of total steps for warmup (default: 0.2)
+        start_factor: Starting LR factor relative to each group's initial LR (default: 0.1)
+        min_lr: Minimum learning rate (default: 3e-5)
+
+    Returns:
+        OneCycleLR scheduler with:
+        - Warmup to max_lr over warmup_fraction of steps
+        - Cosine decay to min_lr over remaining steps
+        - Respects per-parameter-group learning rates
+    """
+    # Get max_lr for each param group from their initial 'lr' setting
+    # This preserves the different LRs set for different param groups (e.g., Lu vs others)
+    max_lrs = [group['lr'] for group in optimizer.param_groups]
+
+    # Create OneCycleLR scheduler with per-group max_lr
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=max_lrs,  # Use list to respect different LRs per group
+        total_steps=total_steps,
+        # pct_start controls warmup phase (fraction of total steps)
+        pct_start=warmup_fraction,
+        # anneal_strategy: 'cos' for cosine, 'linear' for linear
+        anneal_strategy='linear',
+        # For Adam/AdamW, we should not cycle momentum (they use adaptive moments, not SGD momentum)
+        cycle_momentum=False,
+        # Final learning rate
+        div_factor=1.0 / start_factor,  # max_lr / start_lr for each group
+        final_div_factor=max(max_lrs) / min_lr,  # Use max of group LRs for final decay
+    )
+
+    return scheduler
+
+
 def _get_log_likelihood(pY, data):
     """Return element-wise log likelihood, with Poisson handled manually."""
     if isinstance(pY, Poisson):
@@ -92,6 +140,9 @@ def train_svgp_batched_with_tracking(
     lengthscale_unfreeze_step: Optional[int] = None,
     lengthscale_param=None,
     lengthscale_lr: Optional[float] = None,
+    scale_unfreeze_step: Optional[int] = None,
+    scale_params=None,
+    scale_lr: Optional[float] = None,
     writer: Optional[SummaryWriter] = None,
     progress_desc: str = "SVGP",
     image_log_every: Optional[int] = None,
@@ -106,10 +157,26 @@ def train_svgp_batched_with_tracking(
     ls_added = ls_param is None or _is_param_in_optimizer(ls_param, optimizer)
     base_lr = lengthscale_lr if lengthscale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
 
+    # Handle scale parameter unfreezing
+    scale_params_list = scale_params if scale_params is not None else []
+    scale_unfrozen = len(scale_params_list) == 0  # True if no scale params to manage
+    scale_target_lr = scale_lr if scale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
+
     for it in trange(start_step, start_step + steps, desc=progress_desc):
         if lengthscale_unfreeze_step is not None and not ls_added and it >= lengthscale_unfreeze_step:
             optimizer.add_param_group({"params": [ls_param], "lr": base_lr})
             ls_added = True
+
+        if scale_unfreeze_step is not None and not scale_unfrozen and it >= scale_unfreeze_step:
+            # Unfreeze scale parameters and update their learning rate
+            for param in scale_params_list:
+                param.requires_grad = True
+            # Find the param group containing scale params and update its lr
+            for group in optimizer.param_groups:
+                if scale_params_list and any(p is scale_params_list[0] for p in group['params']):
+                    group['lr'] = scale_target_lr
+                    break
+            scale_unfrozen = True
 
         idx = torch.multinomial(torch.ones(N), num_samples=min(x_batch_size, N), replacement=False)
         idy = torch.multinomial(torch.ones(J), num_samples=min(y_batch_size, J), replacement=False)
@@ -127,7 +194,10 @@ def train_svgp_batched_with_tracking(
 
         loss.backward()
         optimizer.step()
-        if scheduler is not None:
+        # Apply parameter projection if using projected gradient mode
+        if hasattr(model, 'project_parameters'):
+            model.project_parameters()
+        if scheduler is not None and scheduler.last_epoch < scheduler.total_steps:
             scheduler.step()
         losses.append(loss.item())
 
@@ -137,12 +207,33 @@ def train_svgp_batched_with_tracking(
                 writer.add_scalar("kernel/lengthscale", ls_param.detach().mean().item(), it)
             writer.add_histogram("qF/mean", qF.mean, it)
             writer.add_histogram("qF/scale", qF.scale, it)
+            # Log qF.scale statistics to debug constraint violations
+            writer.add_scalar("qF/scale_min", qF.scale.min().item(), it)
+            writer.add_scalar("qF/scale_max", qF.scale.max().item(), it)
+            writer.add_scalar("qF/scale_mean", qF.scale.mean().item(), it)
+            # Check for invalid values
+            num_nan = torch.isnan(qF.scale).sum().item()
+            num_inf = torch.isinf(qF.scale).sum().item()
+            num_nonpositive = (qF.scale <= 0).sum().item()
+            writer.add_scalar("qF/scale_num_nan", num_nan, it)
+            writer.add_scalar("qF/scale_num_inf", num_inf, it)
+            writer.add_scalar("qF/scale_num_nonpositive", num_nonpositive, it)
             # Log Lu diagonal (after softplus/exp transformation)
             if hasattr(model.prior, "Lu"):
                 Lu_raw = model.prior.Lu.detach()
                 Lu_diag = torch.exp(torch.diagonal(Lu_raw, dim1=-2, dim2=-1))
                 writer.add_histogram("Lu/diag", Lu_diag, it)
                 writer.add_scalar("Lu/diag_mean", Lu_diag.mean().item(), it)
+            # Log W loadings (raw values before transformation)
+            if hasattr(model, 'W'):
+                W_raw = model.W.detach()
+                writer.add_histogram("W/raw", W_raw, it)
+                writer.add_scalar("W/mean", W_raw.mean().item(), it)
+                writer.add_scalar("W/min", W_raw.min().item(), it)
+                writer.add_scalar("W/max", W_raw.max().item(), it)
+                # Count negative values
+                num_negative = (W_raw < 0).sum().item()
+                writer.add_scalar("W/num_negative", num_negative, it)
 
         if it % 10 == 0:
             idxs.append(idx.detach().cpu().numpy())
@@ -183,6 +274,9 @@ def train_vnngp_batched_with_tracking(
     lengthscale_unfreeze_step: Optional[int] = None,
     lengthscale_param=None,
     lengthscale_lr: Optional[float] = None,
+    scale_unfreeze_step: Optional[int] = None,
+    scale_params=None,
+    scale_lr: Optional[float] = None,
     writer: Optional[SummaryWriter] = None,
     progress_desc: str = "VNNGP",
     image_log_every: Optional[int] = None,
@@ -197,6 +291,11 @@ def train_vnngp_batched_with_tracking(
     ls_added = ls_param is None or _is_param_in_optimizer(ls_param, optimizer)
     base_lr = lengthscale_lr if lengthscale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
 
+    # Handle scale parameter unfreezing
+    scale_params_list = scale_params if scale_params is not None else []
+    scale_unfrozen = len(scale_params_list) == 0  # True if no scale params to manage
+    scale_target_lr = scale_lr if scale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
+
     full_knn_idx = model.prior.calculate_knn(X).clone()[:, :-1]
 
     for it in trange(start_step, start_step + steps, desc=progress_desc):
@@ -204,6 +303,17 @@ def train_vnngp_batched_with_tracking(
             ls_param.requires_grad = True
             optimizer.add_param_group({"params": [ls_param], "lr": base_lr})
             ls_added = True
+
+        if scale_unfreeze_step is not None and not scale_unfrozen and it >= scale_unfreeze_step:
+            # Unfreeze scale parameters and update their learning rate
+            for param in scale_params_list:
+                param.requires_grad = True
+            # Find the param group containing scale params and update its lr
+            for group in optimizer.param_groups:
+                if scale_params_list and any(p is scale_params_list[0] for p in group['params']):
+                    group['lr'] = scale_target_lr
+                    break
+            scale_unfrozen = True
 
         idx = torch.multinomial(torch.ones(N), num_samples=min(x_batch_size, N), replacement=False)
         idy = torch.multinomial(torch.ones(J), num_samples=min(y_batch_size, J), replacement=False)
@@ -214,7 +324,7 @@ def train_vnngp_batched_with_tracking(
         model.prior.knn_idx = knn_idx
 
         optimizer.zero_grad()
-        pY, qF, qZ, _ = model.forward_batched(Xb.squeeze(), idx=idx, idy=idy)
+        pY, qF, qZ, _ = model.forward_batched_train(Xb.squeeze(), idx=idx, idy=idy)
 
         logpY = _get_log_likelihood(pY, yb)
         L1 = logpY.mean(dim=0).sum()
@@ -223,7 +333,10 @@ def train_vnngp_batched_with_tracking(
 
         loss.backward()
         optimizer.step()
-        if scheduler is not None:
+        # Apply parameter projection if using projected gradient mode
+        if hasattr(model, 'project_parameters'):
+            model.project_parameters()
+        if scheduler is not None and scheduler.last_epoch < scheduler.total_steps:
             scheduler.step()
         losses.append(loss.item())
 
@@ -235,12 +348,33 @@ def train_vnngp_batched_with_tracking(
                 writer.add_scalar("kernel/group_diff_param", kernel.group_diff_param.detach().mean().item(), it)
             writer.add_histogram("qF/mean", qF.mean, it)
             writer.add_histogram("qF/scale", qF.scale, it)
+            # Log qF.scale statistics to debug constraint violations
+            writer.add_scalar("qF/scale_min", qF.scale.min().item(), it)
+            writer.add_scalar("qF/scale_max", qF.scale.max().item(), it)
+            writer.add_scalar("qF/scale_mean", qF.scale.mean().item(), it)
+            # Check for invalid values
+            num_nan = torch.isnan(qF.scale).sum().item()
+            num_inf = torch.isinf(qF.scale).sum().item()
+            num_nonpositive = (qF.scale <= 0).sum().item()
+            writer.add_scalar("qF/scale_num_nan", num_nan, it)
+            writer.add_scalar("qF/scale_num_inf", num_inf, it)
+            writer.add_scalar("qF/scale_num_nonpositive", num_nonpositive, it)
             # Log Lu diagonal (after softplus/exp transformation)
             if hasattr(model.prior, "Lu"):
                 Lu_raw = model.prior.Lu.detach()
                 Lu_diag = torch.exp(torch.diagonal(Lu_raw, dim1=-2, dim2=-1))
                 writer.add_histogram("Lu/diag", Lu_diag, it)
                 writer.add_scalar("Lu/diag_mean", Lu_diag.mean().item(), it)
+            # Log W loadings (raw values before transformation)
+            if hasattr(model, 'W'):
+                W_raw = model.W.detach()
+                writer.add_histogram("W/raw", W_raw, it)
+                writer.add_scalar("W/mean", W_raw.mean().item(), it)
+                writer.add_scalar("W/min", W_raw.min().item(), it)
+                writer.add_scalar("W/max", W_raw.max().item(), it)
+                # Count negative values
+                num_negative = (W_raw < 0).sum().item()
+                writer.add_scalar("W/num_negative", num_negative, it)
 
         if it % 10 == 0:
             idxs.append(idx.detach().cpu().numpy())
@@ -275,6 +409,9 @@ def train_mggp_svgp_with_tracking(
     lengthscale_unfreeze_step: Optional[int] = None,
     lengthscale_param=None,
     lengthscale_lr: Optional[float] = None,
+    scale_unfreeze_step: Optional[int] = None,
+    scale_params=None,
+    scale_lr: Optional[float] = None,
     writer: Optional[SummaryWriter] = None,
     progress_desc: str = "MGGP-SVGP",
     image_log_every: Optional[int] = None,
@@ -289,10 +426,26 @@ def train_mggp_svgp_with_tracking(
     ls_added = ls_param is None or _is_param_in_optimizer(ls_param, optimizer)
     base_lr = lengthscale_lr if lengthscale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
 
+    # Handle scale parameter unfreezing
+    scale_params_list = scale_params if scale_params is not None else []
+    scale_unfrozen = len(scale_params_list) == 0  # True if no scale params to manage
+    scale_target_lr = scale_lr if scale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
+
     for it in trange(start_step, start_step + steps, desc=progress_desc):
         if lengthscale_unfreeze_step is not None and not ls_added and it >= lengthscale_unfreeze_step:
             optimizer.add_param_group({"params": [ls_param], "lr": base_lr})
             ls_added = True
+
+        if scale_unfreeze_step is not None and not scale_unfrozen and it >= scale_unfreeze_step:
+            # Unfreeze scale parameters and update their learning rate
+            for param in scale_params_list:
+                param.requires_grad = True
+            # Find the param group containing scale params and update its lr
+            for group in optimizer.param_groups:
+                if scale_params_list and any(p is scale_params_list[0] for p in group['params']):
+                    group['lr'] = scale_target_lr
+                    break
+            scale_unfrozen = True
 
         idx = torch.multinomial(torch.ones(N), num_samples=min(x_batch_size, N), replacement=False)
         idy = torch.multinomial(torch.ones(J), num_samples=min(y_batch_size, J), replacement=False)
@@ -311,7 +464,10 @@ def train_mggp_svgp_with_tracking(
 
         loss.backward()
         optimizer.step()
-        if scheduler is not None:
+        # Apply parameter projection if using projected gradient mode
+        if hasattr(model, 'project_parameters'):
+            model.project_parameters()
+        if scheduler is not None and scheduler.last_epoch < scheduler.total_steps:
             scheduler.step()
         losses.append(loss.item())
 
@@ -323,12 +479,33 @@ def train_mggp_svgp_with_tracking(
                 writer.add_scalar("kernel/group_diff_param", kernel.group_diff_param.detach().mean().item(), it)
             writer.add_histogram("qF/mean", qF.mean, it)
             writer.add_histogram("qF/scale", qF.scale, it)
+            # Log qF.scale statistics to debug constraint violations
+            writer.add_scalar("qF/scale_min", qF.scale.min().item(), it)
+            writer.add_scalar("qF/scale_max", qF.scale.max().item(), it)
+            writer.add_scalar("qF/scale_mean", qF.scale.mean().item(), it)
+            # Check for invalid values
+            num_nan = torch.isnan(qF.scale).sum().item()
+            num_inf = torch.isinf(qF.scale).sum().item()
+            num_nonpositive = (qF.scale <= 0).sum().item()
+            writer.add_scalar("qF/scale_num_nan", num_nan, it)
+            writer.add_scalar("qF/scale_num_inf", num_inf, it)
+            writer.add_scalar("qF/scale_num_nonpositive", num_nonpositive, it)
             # Log Lu diagonal (after softplus/exp transformation)
             if hasattr(model.prior, "Lu"):
                 Lu_raw = model.prior.Lu.detach()
                 Lu_diag = torch.exp(torch.diagonal(Lu_raw, dim1=-2, dim2=-1))
                 writer.add_histogram("Lu/diag", Lu_diag, it)
                 writer.add_scalar("Lu/diag_mean", Lu_diag.mean().item(), it)
+            # Log W loadings (raw values before transformation)
+            if hasattr(model, 'W'):
+                W_raw = model.W.detach()
+                writer.add_histogram("W/raw", W_raw, it)
+                writer.add_scalar("W/mean", W_raw.mean().item(), it)
+                writer.add_scalar("W/min", W_raw.min().item(), it)
+                writer.add_scalar("W/max", W_raw.max().item(), it)
+                # Count negative values
+                num_negative = (W_raw < 0).sum().item()
+                writer.add_scalar("W/num_negative", num_negative, it)
 
         if it % 10 == 0:
             idxs.append(idx.detach().cpu().numpy())
@@ -363,6 +540,9 @@ def train_mggp_vnngp_with_tracking(
     lengthscale_unfreeze_step: Optional[int] = None,
     lengthscale_param=None,
     lengthscale_lr: Optional[float] = None,
+    scale_unfreeze_step: Optional[int] = None,
+    scale_params=None,
+    scale_lr: Optional[float] = None,
     writer: Optional[SummaryWriter] = None,
     progress_desc: str = "MGGP-VNNGP",
     image_log_every: Optional[int] = None,
@@ -377,6 +557,11 @@ def train_mggp_vnngp_with_tracking(
     ls_added = ls_param is None or _is_param_in_optimizer(ls_param, optimizer)
     base_lr = lengthscale_lr if lengthscale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
 
+    # Handle scale parameter unfreezing
+    scale_params_list = scale_params if scale_params is not None else []
+    scale_unfrozen = len(scale_params_list) == 0  # True if no scale params to manage
+    scale_target_lr = scale_lr if scale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
+
     full_knn_idx = model.prior.calculate_knn(X).clone()[:, :-1]
 
     for it in trange(start_step, start_step + steps, desc=progress_desc):
@@ -384,6 +569,17 @@ def train_mggp_vnngp_with_tracking(
             ls_param.requires_grad = True
             optimizer.add_param_group({"params": [ls_param], "lr": base_lr})
             ls_added = True
+
+        if scale_unfreeze_step is not None and not scale_unfrozen and it >= scale_unfreeze_step:
+            # Unfreeze scale parameters and update their learning rate
+            for param in scale_params_list:
+                param.requires_grad = True
+            # Find the param group containing scale params and update its lr
+            for group in optimizer.param_groups:
+                if scale_params_list and any(p is scale_params_list[0] for p in group['params']):
+                    group['lr'] = scale_target_lr
+                    break
+            scale_unfrozen = True
 
         idx = torch.multinomial(torch.ones(N), num_samples=min(x_batch_size, N), replacement=False)
         idy = torch.multinomial(torch.ones(J), num_samples=min(y_batch_size, J), replacement=False)
@@ -395,7 +591,7 @@ def train_mggp_vnngp_with_tracking(
         model.prior.knn_idx = knn_idx
 
         optimizer.zero_grad()
-        pY, qF, qZ, _ = model.forward_batched(
+        pY, qF, qZ, _ = model.forward_batched_train(
             Xb.squeeze(), idx=idx, groupsX=gb, idy=idy, E=e_samples
         )
 
@@ -406,7 +602,10 @@ def train_mggp_vnngp_with_tracking(
 
         loss.backward()
         optimizer.step()
-        if scheduler is not None:
+        # Apply parameter projection if using projected gradient mode
+        if hasattr(model, 'project_parameters'):
+            model.project_parameters()
+        if scheduler is not None and scheduler.last_epoch < scheduler.total_steps:
             scheduler.step()
         losses.append(loss.item())
 
@@ -418,12 +617,33 @@ def train_mggp_vnngp_with_tracking(
                 writer.add_scalar("kernel/group_diff_param", kernel.group_diff_param.detach().mean().item(), it)
             writer.add_histogram("qF/mean", qF.mean, it)
             writer.add_histogram("qF/scale", qF.scale, it)
+            # Log qF.scale statistics to debug constraint violations
+            writer.add_scalar("qF/scale_min", qF.scale.min().item(), it)
+            writer.add_scalar("qF/scale_max", qF.scale.max().item(), it)
+            writer.add_scalar("qF/scale_mean", qF.scale.mean().item(), it)
+            # Check for invalid values
+            num_nan = torch.isnan(qF.scale).sum().item()
+            num_inf = torch.isinf(qF.scale).sum().item()
+            num_nonpositive = (qF.scale <= 0).sum().item()
+            writer.add_scalar("qF/scale_num_nan", num_nan, it)
+            writer.add_scalar("qF/scale_num_inf", num_inf, it)
+            writer.add_scalar("qF/scale_num_nonpositive", num_nonpositive, it)
             # Log Lu diagonal (after softplus/exp transformation)
             if hasattr(model.prior, "Lu"):
                 Lu_raw = model.prior.Lu.detach()
                 Lu_diag = torch.exp(torch.diagonal(Lu_raw, dim1=-2, dim2=-1))
                 writer.add_histogram("Lu/diag", Lu_diag, it)
                 writer.add_scalar("Lu/diag_mean", Lu_diag.mean().item(), it)
+            # Log W loadings (raw values before transformation)
+            if hasattr(model, 'W'):
+                W_raw = model.W.detach()
+                writer.add_histogram("W/raw", W_raw, it)
+                writer.add_scalar("W/mean", W_raw.mean().item(), it)
+                writer.add_scalar("W/min", W_raw.min().item(), it)
+                writer.add_scalar("W/max", W_raw.max().item(), it)
+                # Count negative values
+                num_negative = (W_raw < 0).sum().item()
+                writer.add_scalar("W/num_negative", num_negative, it)
 
         if it % 10 == 0:
             idxs.append(idx.detach().cpu().numpy())
@@ -484,3 +704,42 @@ def freeze_kernel_and_inputs(model) -> None:
     """Backward-compatible wrapper used by legacy scripts."""
 
     freeze_mggp_kernel_and_inputs(model)
+
+
+def prepare_frozen_scale_and_lengthscale_params(model):
+    """
+    Prepare parameter groups with frozen scale (Lu) and lengthscale parameters.
+
+    This function:
+    1. Freezes the lengthscale parameter if it exists
+    2. Separates scale parameters (Lu) from other parameters
+    3. Freezes scale parameters initially
+    4. Returns the separated parameter lists for optimizer setup
+
+    Args:
+        model: The model whose parameters to prepare
+
+    Returns:
+        tuple: (scale_params, other_params, lengthscale_param)
+            - scale_params: List of Lu parameters (frozen)
+            - other_params: List of other trainable parameters
+            - lengthscale_param: The lengthscale parameter (frozen) or None
+    """
+    # Freeze lengthscale parameter
+    lengthscale_param = getattr(model.prior.kernel, "lengthscale", None)
+    if lengthscale_param is not None:
+        lengthscale_param.requires_grad = False
+
+    # Separate scale parameters (Lu) from other parameters
+    scale_params = []
+    other_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "Lu" in name:
+            param.requires_grad = False  # Freeze initially
+            scale_params.append(param)
+        else:
+            other_params.append(param)
+
+    return scale_params, other_params, lengthscale_param

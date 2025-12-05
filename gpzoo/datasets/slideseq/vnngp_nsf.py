@@ -36,6 +36,8 @@ def create_model(
     state_dict: Optional[Mapping[str, torch.Tensor]] = None,
     lu_rank: Optional[int] = None,
     lu_init_iters: int = 10,
+    scale_multiplier: float = 1e-6,
+    loadings_mode: str = "softplus",
 ):
     """Build or resume a vanilla VNNGP NSF model for Slideseq."""
 
@@ -68,16 +70,22 @@ def create_model(
         inducing_points=inducing_points,
         lu_rank=lu_rank,
         lu_init_iters=lu_init_iters,
+        scale_multiplier=scale_multiplier,
         subset_step=subset_step,
         precompute_knn=precompute_knn,
         device=device,
         seed=seed,
+        loadings_mode=loadings_mode,
     )
 
 
 def _train_main() -> None:
     from gpzoo.models import build_model
-    from gpzoo.training_utilities import freeze_svgp_kernel_and_inputs, train_vnngp_batched_with_tracking
+    from gpzoo.training_utilities import (
+        freeze_svgp_kernel_and_inputs,
+        train_vnngp_batched_with_tracking,
+        create_sequential_lr_scheduler,
+    )
     from gpzoo.datasets.slideseq.common import (
         DEVICE,
         OUTPUT_DIR,
@@ -91,9 +99,12 @@ def _train_main() -> None:
         L_FACTORS,
         LENGTHSCALE,
         LENGTHSCALE_TRAIN_AFTER,
+        LOADINGS_MODE,
         LR,
         LR_LENGTHSCALE,
         LR_SCALE,
+        SCALE_MULTIPLIER,
+        SCALE_TRAIN_AFTER,
         SEED,
         STEPS,
         VNNGP_K,
@@ -124,37 +135,38 @@ def _train_main() -> None:
         jitter=JITTER,
         K=VNNGP_K,
         subset_step=10,
+        scale_multiplier=SCALE_MULTIPLIER,
         device=DEVICE,
         seed=SEED,
         precompute_knn=True,
+        loadings_mode=LOADINGS_MODE,
     )
 
 
     freeze_svgp_kernel_and_inputs(model)
-    lengthscale_param = getattr(model.prior.kernel, "lengthscale", None)
-    if lengthscale_param is not None:
-        lengthscale_param.requires_grad = False
 
-    # Build param groups with separate LR for scale (Lu)
-    scale_params = []
-    other_params = []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if "Lu" in name:
-            scale_params.append(param)
-        else:
-            other_params.append(param)
+    # Prepare frozen scale and lengthscale parameters
+    from gpzoo.training_utilities import prepare_frozen_scale_and_lengthscale_params
+    scale_params, other_params, lengthscale_param = prepare_frozen_scale_and_lengthscale_params(model)
 
-    param_groups = [{"params": other_params, "lr": LR}]
-    if scale_params:
-        param_groups.append({"params": scale_params, "lr": LR_SCALE})
+    # Add all params to optimizer, but scale_params start with lr=0 (frozen)
+    param_groups = [
+        {"params": other_params, "lr": LR},
+        {"params": scale_params, "lr": 0.0},  # Start frozen with lr=0
+    ]
 
-    # Use AdamW with weight decay for better regularization
-    optimizer = optim.AdamW(param_groups, weight_decay=1e-4)
+    # Use Adam optimizer
+    optimizer = optim.Adam(param_groups)
 
-    # Add CosineAnnealingLR scheduler
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=STEPS, eta_min=LR*0.01)
+    # Create SequentialLR scheduler: Linear warmup + Cosine decay
+    scheduler = create_sequential_lr_scheduler(
+        optimizer=optimizer,
+        total_steps=STEPS,
+        base_lr=LR,
+        warmup_fraction=0.2,
+        start_factor=0.1,
+        min_lr=3e-5,
+    )
 
     save_path = checkpoint_path
     result = run_training(
@@ -172,6 +184,9 @@ def _train_main() -> None:
         lengthscale_unfreeze_step=LENGTHSCALE_TRAIN_AFTER,
         lengthscale_param=lengthscale_param,
         lengthscale_lr=LR_LENGTHSCALE,
+        scale_unfreeze_step=SCALE_TRAIN_AFTER,
+        scale_params=scale_params,
+        scale_lr=LR_SCALE,
         writer=writer,
         progress_desc=f"VNNGP (slideseq)",
         image_log_every=IMAGE_LOG_EVERY,
