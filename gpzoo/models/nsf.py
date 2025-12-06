@@ -30,9 +30,9 @@ from ..utilities import init_Lu_nsf, init_Lu
 from ..model_utilities import (
     mggp_kmeans_inducing_points,
     _init_mu_from_lu,
-    _log_diagonals,
     _default_device,
 )
+from ..modules import CholeskyParameter
 
 
 class SVGP_NSF(nn.Module):
@@ -53,7 +53,8 @@ class SVGP_NSF(nn.Module):
         V: Optional size factors, shape (N,)
         jitter: Numerical stability term
         kernel_type: "matern32" or "rbf"
-        lu_use_cholesky: Use Cholesky initialization for Lu
+        cholesky_mode: 'exp' or 'softplus' for Lu diagonal constraint
+        diagonal_only: If True, use diagonal covariance for Lu
         device: Target device
         seed: Random seed for reproducibility
         loadings_mode: Loadings W transformation mode: 'softplus', 'exp', 'exp_sum', or 'projected'
@@ -78,10 +79,11 @@ class SVGP_NSF(nn.Module):
         V: Optional[torch.Tensor] = None,
         jitter: float = 1e-5,
         kernel_type: Literal["matern32", "rbf"] = "matern32",
-        lu_use_cholesky: bool = True,
         lu_rank: Optional[int] = None,
         lu_init_iters: int = 10,
         scale_multiplier: float = 1e-6,
+        cholesky_mode: str = "exp",
+        diagonal_only: bool = False,
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
         loadings_mode: str = "softplus",
@@ -101,21 +103,28 @@ class SVGP_NSF(nn.Module):
             Z = inducing_points.clone()
         M = Z.shape[0]
 
-        # Create GP
-        gp = SVGP(kernel, M=M, jitter=jitter)
+        # Create GP with CholeskyParameter settings
+        gp = SVGP(kernel, M=M, jitter=jitter, 
+                  cholesky_mode=cholesky_mode, diagonal_only=diagonal_only)
         gp.Z = nn.Parameter(Z, requires_grad=False)
 
-        # Initialize Lu
+        # Initialize Lu - compute the target Cholesky factor
         rank = lu_rank or M
         Lu_base = init_Lu_nsf(
             kernel, Z, Z, K=rank, niter=lu_init_iters,
-            use_cholesky=lu_use_cholesky, jitter=jitter
+            use_cholesky=True, jitter=jitter
         )
         if Lu_base.dim() == 2:
             Lu_base = Lu_base.unsqueeze(0)
-        Lu = Lu_base.expand(L, -1, -1).contiguous()
-        Lu_param = _log_diagonals(scale_multiplier * Lu) if lu_use_cholesky else scale_multiplier * Lu
-        gp.Lu = nn.Parameter(Lu_param.clone().detach())
+        
+        # Scale and expand for L latent factors
+        Lu_target = (scale_multiplier * Lu_base).expand(L, -1, -1).contiguous()
+        
+        # Replace the single M-sized CholeskyParameter with L x M x M batched version
+        del gp.Lu
+        gp.Lu = CholeskyParameter((L, M), mode=cholesky_mode, diagonal_only=diagonal_only)
+        gp.Lu.data = Lu_target  # Set constrained value directly
+        
         gp.mu = nn.Parameter(_init_mu_from_lu(Lu_base.squeeze(0), L, gp.Lu.device, seed))
 
         # Create NSF likelihood wrapper with loadings_mode
@@ -135,11 +144,11 @@ class SVGP_NSF(nn.Module):
 
     @property
     def W(self):
-        return self._model.W.value
+        return self._model.W.data
 
     @W.setter
     def W(self, value):
-        self._model.W._raw.data = value
+        self._model.W.data = value
 
     @property
     def V(self):
@@ -247,7 +256,7 @@ class VNNGP_NSF(nn.Module):
             Z = inducing_points.clone()
         M = Z.shape[0]
 
-        # Create GP
+        # Create GP (VNNGP uses raw nn.Parameter for Lu, not CholeskyParameter)
         gp = VNNGP(kernel, M=M, jitter=jitter, K=K)
         gp.Z = nn.Parameter(Z, requires_grad=True)
 
@@ -258,15 +267,13 @@ class VNNGP_NSF(nn.Module):
         if Lu_base.dim() == 2:
             Lu_base = Lu_base.unsqueeze(0)
         Lu = Lu_base.expand(L, -1, -1).contiguous()
+        # VNNGP uses raw parameters, so apply scale directly
         gp.Lu = nn.Parameter((scale_multiplier * Lu).clone().detach())
         gp.mu = nn.Parameter(_init_mu_from_lu(Lu_base.squeeze(0), L, gp.Lu.device, seed))
 
         # Create NSF likelihood wrapper
-        self._model = NSF2(gp, Y, L=L)
-        self._model.projection_mode = loadings_mode  # Use specified loadings mode
+        self._model = NSF2(gp, Y, L=L, loadings_mode=loadings_mode)
         self._model.prior.K = K
-        D = Y.shape[0]
-        self._model.W = nn.Parameter(torch.rand(D, L, device=Y.device, dtype=Y.dtype))
 
         if V is None:
             V = torch.ones(Y.shape[1], dtype=Y.dtype, device=Y.device)
@@ -289,7 +296,7 @@ class VNNGP_NSF(nn.Module):
 
     @property
     def W(self):
-        return self._model.W.value
+        return self._model.W.data
 
     @W.setter
     def W(self, value):
@@ -354,6 +361,8 @@ class MGGP_SVGP_NSF(nn.Module):
         V: Optional size factors, shape (N,)
         jitter: Numerical stability term
         kernel_type: "matern32" or "rbf"
+        cholesky_mode: 'exp' or 'softplus' for Lu diagonal constraint
+        diagonal_only: If True, use diagonal covariance for Lu
         inducing_method: "kmeans" or "random"
         device: Target device
         seed: Random seed for reproducibility
@@ -383,8 +392,9 @@ class MGGP_SVGP_NSF(nn.Module):
         V: Optional[torch.Tensor] = None,
         jitter: float = 1e-5,
         kernel_type: Literal["matern32", "rbf"] = "matern32",
-        lu_use_cholesky: bool = True,
         scale_multiplier: float = 1e-6,
+        cholesky_mode: str = "exp",
+        diagonal_only: bool = False,
         inducing_method: Literal["kmeans", "random"] = "kmeans",
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
@@ -415,21 +425,28 @@ class MGGP_SVGP_NSF(nn.Module):
             groupsZ = inducing_groups.clone()
         M = Z.shape[0]
 
-        # Create GP
-        gp = MGGP_SVGP(kernel, M=M, n_groups=n_groups, jitter=jitter)
+        # Create GP with CholeskyParameter settings
+        gp = MGGP_SVGP(kernel, M=M, n_groups=n_groups, jitter=jitter,
+                       cholesky_mode=cholesky_mode, diagonal_only=diagonal_only)
         gp.Z = nn.Parameter(Z, requires_grad=False)
         gp.groupsZ = nn.Parameter(groupsZ, requires_grad=False)
 
-        # Initialize Lu
+        # Initialize Lu - compute the target Cholesky factor
         Lu_base = init_Lu(
             kernel, Z, groupsZ, Z, groupsZ, K=M,
-            use_cholesky=lu_use_cholesky, jitter=jitter
+            use_cholesky=True, jitter=jitter
         )
         if Lu_base.dim() == 2:
             Lu_base = Lu_base.unsqueeze(0)
-        Lu = Lu_base.expand(L, -1, -1).contiguous()
-        Lu_param = _log_diagonals(scale_multiplier * Lu) if lu_use_cholesky else scale_multiplier * Lu
-        gp.Lu = nn.Parameter(Lu_param.clone().detach())
+        
+        # Scale and expand for L latent factors
+        Lu_target = (scale_multiplier * Lu_base).expand(L, -1, -1).contiguous()
+        
+        # Replace the single M-sized CholeskyParameter with L x M x M batched version
+        del gp.Lu
+        gp.Lu = CholeskyParameter((L, M), mode=cholesky_mode, diagonal_only=diagonal_only)
+        gp.Lu.data = Lu_target  # Set constrained value directly
+        
         gp.mu = nn.Parameter(_init_mu_from_lu(Lu_base.squeeze(0), L, gp.Lu.device, seed))
 
         # Create NSF likelihood wrapper with loadings_mode
@@ -449,7 +466,7 @@ class MGGP_SVGP_NSF(nn.Module):
 
     @property
     def W(self):
-        return self._model.W.value
+        return self._model.W.data
 
     @W.setter
     def W(self, value):
@@ -574,7 +591,7 @@ class MGGP_VNNGP_NSF(nn.Module):
             groupsZ = inducing_groups.clone()
         M = Z.shape[0]
 
-        # Create GP
+        # Create GP (VNNGP uses raw nn.Parameter for Lu, not CholeskyParameter)
         gp = MGGP_VNNGP(kernel, M=M, n_groups=n_groups, jitter=jitter, K=K)
         gp.Z = nn.Parameter(Z, requires_grad=False)
         gp.groupsZ = nn.Parameter(groupsZ, requires_grad=False)
@@ -586,15 +603,13 @@ class MGGP_VNNGP_NSF(nn.Module):
         if Lu_base.dim() == 2:
             Lu_base = Lu_base.unsqueeze(0)
         Lu = Lu_base.expand(L, -1, -1).contiguous()
+        # VNNGP uses raw parameters, so apply scale directly
         gp.Lu = nn.Parameter((scale_multiplier * Lu).clone().detach())
         gp.mu = nn.Parameter(_init_mu_from_lu(Lu_base.squeeze(0), L, gp.Lu.device, seed))
 
         # Create NSF likelihood wrapper
-        self._model = NSF2(gp, Y, L=L)
-        self._model.projection_mode = loadings_mode  # Use specified loadings mode
+        self._model = NSF2(gp, Y, L=L, loadings_mode=loadings_mode)
         self._model.prior.K = K
-        D = Y.shape[0]
-        self._model.W = nn.Parameter(torch.rand(D, L, device=Y.device, dtype=Y.dtype))
 
         if V is None:
             V = torch.ones(Y.shape[1], dtype=Y.dtype, device=Y.device)
@@ -617,7 +632,7 @@ class MGGP_VNNGP_NSF(nn.Module):
 
     @property
     def W(self):
-        return self._model.W.value
+        return self._model.W.data
 
     @W.setter
     def W(self, value):

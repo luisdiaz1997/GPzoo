@@ -3,6 +3,7 @@ from torch import distributions
 from torch.distributions import constraints, transform_to
 import torch.nn as nn
 from .utilities import add_jitter, svgp_forward, reshape_param, whitened_KL, is_lower_triangular
+from .modules import CholeskyParameter
 import faiss
 
 
@@ -279,26 +280,44 @@ class GaussianPrior(nn.Module):
   
 
 class WSVGP(BaseVGP):
-  """Whitened Sparse Variational GP"""
-  def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
+  """Whitened Sparse Variational GP
+  
+  Uses CholeskyParameter for clean constraint handling.
+  
+  Args:
+      kernel: GP kernel function
+      dim: Input dimension
+      M: Number of inducing points
+      jitter: Jitter for numerical stability
+      diagonal_only: If True, use diagonal covariance (default: False)
+      cholesky_mode: 'exp' or 'softplus' for diagonal constraint (default: 'exp')
+  
+  The Lu attribute is a CholeskyParameter. Access patterns:
+      - model.Lu.data                  -> constrained Cholesky factor (for computation)
+      - model.Lu.requires_grad = True  -> control gradient
+      - model.Lu.freeze() / unfreeze() -> convenience methods
+  """
+  def __init__(self, kernel, dim=1, M=50, jitter=1e-4, diagonal_only=False, cholesky_mode='exp'):
     super().__init__(kernel, dim, M, jitter)
+    
+    self.diagonal_only = diagonal_only
+    self.cholesky_mode = cholesky_mode
+    
+    # Replace manual Lu parameter with CholeskyParameter
+    # Remove the inherited Lu from BaseVGP and replace with CholeskyParameter
+    del self.Lu
+    self.Lu = CholeskyParameter(M, mode=cholesky_mode, diagonal_only=diagonal_only)
 
-    self.Lu = None
-    self.diagonal = False
-
-
+  def Lu_is_diagonal(self):
+    """Check if Lu is diagonal."""
+    return self.diagonal_only
 
   def apply_constraints(self):
-    """Apply constraints to all parameters that require it."""
-
-    raw = self.Lu
-    diag = torch.exp(torch.diagonal(raw, dim1=-2, dim2=-1))
-    Lu = torch.diag_embed(diag)
-
-    if not self.diagonal:
-      lower = torch.tril(raw, diagonal=-1)
-      Lu = lower + Lu
-
+    """Apply constraints to all parameters that require it.
+    
+    CholeskyParameter handles the constraint internally via the .data property.
+    """
+    Lu = self.Lu.data  # Already constrained
     mu = self.mu
     return mu, Lu
 
@@ -310,7 +329,6 @@ class WSVGP(BaseVGP):
     covariances = self.forward_kernels(X, diag=diag, **kwargs)
     if verbose:
         print('→kernels computed')
-    # Kzz = add_jitter(Kzz, self.jitter)
 
     if verbose: print('applying constraints')
 
@@ -355,9 +373,6 @@ class WSVGP(BaseVGP):
           print('cov_diag shape:', cov_diag.shape)
         cov_diag = torch.clamp(cov_diag, min=0.0)
 
-        # if self.Lu_is_diagonal():
-          # cov_diag = cov_diag + torch.sum((W * Lu) ** 2, dim=-1)
-        # else:
         cov_diag = cov_diag + torch.sum((W @ Lu) ** 2, dim=-1)
 
         if verbose:
@@ -376,11 +391,6 @@ class WSVGP(BaseVGP):
         qF = distributions.MultivariateNormal(mean, scale_tril=L_cov)
 
     qZ = distributions.MultivariateNormal(mu, scale_tril=Lu)
-    # M = self.mu.shape[-1]
-    # eye = torch.eye(M, device=self.mu.device).expand_as(self.Lu)
-    # pZ = distributions.MultivariateNormal(
-    #     torch.zeros_like(self.mu), scale_tril=eye
-    # )
     pZ = None
     return qF, qZ, pZ   
      
@@ -416,8 +426,7 @@ class WSVGP(BaseVGP):
 
   def forward_precomputed(self, W, **kwargs):
 
-    Lu = transform_to(self.constraint)(self.Lu) #shape L x M x M
-
+    Lu = self.Lu.data  # Get constrained value
     
     cov_diag = (self.kernel.sigma**2)[:, None] - torch.sum(W**2, dim=-1)
     cov_diag = torch.clamp(cov_diag, min=0.0)
@@ -436,16 +445,22 @@ class WSVGP(BaseVGP):
   def forward_train(self, X, diag=True, verbose=False, **kwargs):
     return self.forward(X, diag=diag, verbose=verbose, **kwargs)
   
+  def set_Lu_from_cholesky(self, L_target: torch.Tensor):
+    """Set Lu from a target Cholesky factor (convenience method)."""
+    self.Lu.data = L_target
+
 
 class SVGP(WSVGP):
-  def __init__(self, kernel, dim=1, M=50, jitter=1e-4):
-    super().__init__(kernel, dim, M, jitter)
-
+  """Standard (non-whitened) Sparse Variational GP
+  
+  Inherits CholeskyParameter handling from WSVGP.
+  """
+  def __init__(self, kernel, dim=1, M=50, jitter=1e-4, diagonal_only=False, cholesky_mode='exp'):
+    super().__init__(kernel, dim, M, jitter, diagonal_only, cholesky_mode)
 
 
   def transform_variables(self, mu, Lu, L, verbose=False):
     """Transform the parameters to ensure the correct constraints."""
-
 
     if L.dim() == 2:
       mu_stacked, mu_shape = self.flatten_to_solve(mu, keepdim=-1)
@@ -497,22 +512,24 @@ class SVGP(WSVGP):
 
     return mu, Lu
 
+
 class VNNGP(SVGP):
-  def __init__(self, kernel, dim=1, M=50, jitter=1e-4, K=3):
-    super().__init__(kernel, dim, M, jitter)
+  def __init__(self, kernel, dim=1, M=50, jitter=1e-4, K=3, diagonal_only=False, cholesky_mode='exp'):
+    # Call parent but we'll override Lu
+    super().__init__(kernel, dim, M, jitter, diagonal_only, cholesky_mode)
     self.K = K
-    # self.reshape_input = True  # WVNNGP needs to reshape the input for the forward pass
     self.knn_idx = None  # Store the indices of the K nearest neighbors
     self.knn_idz = None
     self.inducing_points = True
 
+    # Override Lu with a different shape for VNNGP (raw nn.Parameter, not CholeskyParameter)
+    del self.Lu
     self.Lu = nn.Parameter(torch.randn((M, K)))
 
   def apply_constraints(self):
 
     mu = self.mu
     Lu = self.Lu
-
 
     return mu, Lu
 
@@ -538,15 +555,8 @@ class VNNGP(SVGP):
     Z = kwargs.get("Z")
     knn_idx = kwargs.get("knn_idx", self.knn_idx)
 
-    X, Z = super().reshape_input_data(X=X, Z=Z)
+    X, Z = super(SVGP, self).reshape_input_data(X=X, Z=Z)
     X = X.unsqueeze(-2)
-
-    
-    # if self.inducing_points:
-    #   knn_idx = knn_idx[:, :-1] # Exclude last index
-    # else:
-    #   knn_idx = knn_idx[:, 1:] # Exclude first index
-
 
     Z = Z[knn_idx]
     return X, Z
@@ -572,13 +582,6 @@ class VNNGP(SVGP):
     # Restore shape: [*B, N, K]
     mu = mu_knn.reshape(*mu_shape[:-1], knn_idx.shape[0], self.K)
 
-
-    # Lu_shape = Lu.shape  # [*B, M, M]
-    # Lu_reshaped = Lu.reshape(-1, Lu_shape[-2], Lu_shape[-1])  # [B, M, M] or [1, M, M]
-    # Lu_knn = Lu_reshaped[:, self.knn_idx]  # [B, N, K, M]
-    # Lu_knn = Lu_knn.reshape(*Lu_shape[:-2], self.knn_idx.shape[0], self.K, Lu_shape[-1])
-
-
     Lu_shape = Lu.shape  # [*B, M, M]
     Lu_reshaped = Lu.reshape(-1, Lu_shape[-2], Lu_shape[-1])  # [B, M] or [1, M, M]
     Lu_knn = Lu_reshaped[:, knn_idx]  # [B, N, K, M]
@@ -586,23 +589,16 @@ class VNNGP(SVGP):
     Su_knn = Lu_knn @ Lu_knn.transpose(-2, -1)  # Shape: B x N x K x K
 
     Su_knn = Su_knn.reshape(*Lu_shape[:-2], knn_idx.shape[0], self.K, self.K)  # [*B, N, K, K]
-    # Su_knn = Lu_knn @ Lu_knn.transpose(-2, -1)  # Shape: B x N x K x K
 
     #   # Add jitter for numerical stability
     Su_knn = add_jitter(Su_knn, self.jitter)
     Lu = torch.linalg.cholesky(Su_knn)  # Cholesky decomposition, Shape: B x N x K x K
 
-
-
     if verbose:
       print('computing little Lu')
       print('Lu_knn shape:', Lu_knn.shape)
       print('Lu.shape:', Lu.shape)
-    # S = Lu_knn @ Lu_knn.transpose(-2, -1)  # Shape: B x N x K x K
-    # Lu = torch.linalg.cholesky(S)
 
-
-    # Kxx = Kxx.reshape(*Kxx.shape[:-1], N, 1)  # Reshape Kxx to [*B, N, 1]
     Kxx=Kxx.squeeze(-1)
 
     if verbose:
@@ -636,25 +632,14 @@ class VNNGP(SVGP):
   
   def forward(self, X, diag=True, verbose=False, **kwargs):
     
-    qF, qZ, pZ = super().forward(X, diag=diag, verbose=verbose, **kwargs)
-    # if self.inducing_points:
+    qF, qZ, pZ = super(SVGP, self).forward(X, diag=diag, verbose=verbose, **kwargs)
     qF = distributions.Normal(qF.mean.squeeze(-1), qF.scale.squeeze(-1))
-
-    # else:
-    #   if verbose:
-    #     print('→ not using inducing points')
-    #   # qF = distributions.MultivariateNormal(qF.mean.squeeze(-1), scale_tril=qF.scale.squeeze(-1))
-    #   qF = distributions.Normal(self.mu, self.softplus_diagonal_cholesky(self.Lu))
 
     return qF, qZ, pZ
   
   
 
   def kl_divergence_full(self, qZ, pZ=None, verbose=False, idx=None, **kwargs):
-
-
-
-    
 
     if idx is not None:
       Z = self.Z[idx]
@@ -747,10 +732,6 @@ class VNNGP(SVGP):
       print('S_diff min:', S_diff.min())
 
 
-
-
-
-
     KL =  torch.log(cov_diff)-torch.log(S_diff) -1 +  (mean_diff**2  + S_diag + cov_knn - 2*abterm)/cov_diff
 
     KL = 0.5*KL
@@ -813,14 +794,6 @@ class MGGP:
 
     return Kxx, Kzx, Kzz
 
-  # def forward_kernels(self, X, diag=True, **kwargs):
-  #   groupsX = kwargs['groupsX']
-  #   Kxx = self.kernel(X, X, groupsX, groupsX, diag=diag).contiguous()
-  #   Kzx = self.kernel(self.Z, X, self.groupsZ, groupsX, return_distance=self.return_distance)
-  #   Kzz = self.kernel(self.Z, self.Z, self.groupsZ, self.groupsZ).contiguous()
-
-  #   return Kxx, Kzx, Kzz
-
 
 def MGGPWrapper(BaseGPClass):
     class MGGPModel(MGGP, BaseGPClass):
@@ -834,6 +807,3 @@ def MGGPWrapper(BaseGPClass):
 MGGP_WSVGP = MGGPWrapper(WSVGP)
 MGGP_SVGP = MGGPWrapper(SVGP)
 MGGP_VNNGP = MGGPWrapper(VNNGP)
-
-
-
