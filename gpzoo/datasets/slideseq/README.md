@@ -53,6 +53,37 @@ CUDA_VISIBLE_DEVICES=1 python -m gpzoo.datasets.slideseq.svgp_nsf &
 CUDA_VISIBLE_DEVICES=1 python -m gpzoo.datasets.slideseq.svgp_mggp_nsf &
 ```
 
+### One-Command Parallel Runner
+
+Use `run_all.sh` to start all 4 models in parallel with proper GPU assignments:
+
+```bash
+# Make executable if needed
+chmod +x run_all.sh
+
+# Run all models
+./run_all.sh
+```
+
+This script:
+- Runs all 4 training scripts in parallel (background with `&`)
+- Assigns GPU 0 to VNNGP models
+- Assigns GPU 1 to SVGP models
+- Shows process IDs for monitoring
+- Uses the correct conda environment python (`gpzoo` env)
+
+Monitoring commands shown by the script:
+```bash
+# Check GPU usage
+watch -n 1 nvidia-smi
+
+# Check if processes are still running
+ps -p <PID1>,<PID2>,<PID3>,<PID4>
+
+# Kill all jobs
+kill <PID1> <PID2> <PID3> <PID4>
+```
+
 ## Configuration Settings
 
 All models share common configuration in `config.py`:
@@ -212,7 +243,8 @@ gpzoo/datasets/slideseq/
 ├── svgp_nsf.py              # SVGP training script
 ├── svgp_mggp_nsf.py         # SVGP-MGGP training script
 ├── vnngp_nsf.py             # VNNGP training script
-└── vnngp_mggp_nsf.py        # VNNGP-MGGP training script
+├── vnngp_mggp_nsf.py        # VNNGP-MGGP training script
+└── run_all.sh               # Parallel runner for all 4 models
 ```
 
 ## References

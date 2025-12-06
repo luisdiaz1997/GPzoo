@@ -18,13 +18,13 @@ STEPS = 2000
 X_BATCH = 7000
 Y_BATCH = 1000
 L_FACTORS = 10
-LR = 1.0
+LR = 1e-2
 LR_LENGTHSCALE = 1e-4
-LR_SCALE = 1e-2
+LR_SCALE = 1e-3
 SPATIAL_SCALE = 50.0
 LENGTHSCALE = 4.0
 LENGTHSCALE_TRAIN_AFTER = STEPS
-SCALE_TRAIN_AFTER = STEPS//2
+SCALE_TRAIN_AFTER = STEPS//4
 SCALE_MULTIPLIER = 1e-6
 JITTER = 1e-5
 SVGP_INDUCING = 3000
@@ -34,6 +34,9 @@ IMAGE_LOG_EVERY = 100
 
 # Loadings W transformation mode: 'softplus', 'exp', 'exp_sum', or 'projected'
 LOADINGS_MODE = 'projected'
+
+# Whether to use scheduler for learning rate adjustment
+USE_SCHEDULER = False
 
 SVGP_MGGP_CHECKPOINT = OUTPUT_DIR / "slideseq_mggp_svgp.pth"
 VNNGP_MGGP_CHECKPOINT = OUTPUT_DIR / "slideseq_mggp_vnngp_k=50.pth"

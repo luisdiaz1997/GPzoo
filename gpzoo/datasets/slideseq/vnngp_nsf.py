@@ -107,6 +107,7 @@ def _train_main() -> None:
         SCALE_TRAIN_AFTER,
         SEED,
         STEPS,
+        USE_SCHEDULER,
         VNNGP_K,
         X_BATCH,
         Y_BATCH,
@@ -158,15 +159,17 @@ def _train_main() -> None:
     # Use Adam optimizer
     optimizer = optim.Adam(param_groups)
 
-    # Create SequentialLR scheduler: Linear warmup + Cosine decay
-    scheduler = create_sequential_lr_scheduler(
-        optimizer=optimizer,
-        total_steps=STEPS,
-        base_lr=LR,
-        warmup_fraction=0.2,
-        start_factor=0.1,
-        min_lr=3e-5,
-    )
+    # Create SequentialLR scheduler: Linear warmup + Cosine decay (only if USE_SCHEDULER is True)
+    scheduler = None
+    if USE_SCHEDULER:
+        scheduler = create_sequential_lr_scheduler(
+            optimizer=optimizer,
+            total_steps=STEPS,
+            base_lr=LR,
+            warmup_fraction=0.2,
+            start_factor=0.1,
+            min_lr=3e-5,
+        )
 
     save_path = checkpoint_path
     result = run_training(

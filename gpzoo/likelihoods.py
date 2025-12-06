@@ -94,15 +94,15 @@ class PoissonFactorization(nn.Module):
     self.prior = prior
     self.loadings_mode = loadings_mode
     # Use PositiveParameter for loadings W
-    self.W = PositiveParameter((D, L), init_value=1.0, mode=loadings_mode)
+    self.W = PositiveParameter((D, L), mode=loadings_mode)
 
   def get_rate(self, prior_samples, idy=None):
     F = torch.exp(prior_samples)  # shape ExLxN
 
     if idy is not None:
-      W = self.W.value[idy]
+      W = self.W[idy]
     else:
-      W = self.W.value
+      W = self.W
 
     # W is already positive from PositiveParameter
     Z = torch.matmul(W, F)  # shape ExDxN

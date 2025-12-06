@@ -247,7 +247,7 @@ class original_VNNGP(nn.Module):
     mean = mean.contiguous().view(*Kxx_shape)
     cov = cov.contiguous().view(*Kxx_shape)
 
-    qF = distributions.Normal(mean, torch.clamp(cov, min=5e-2) ** 0.5)
+    qF = distributions.Normal(mean, torch.clamp(cov, min=5e-2, max=100.0) ** 0.5)
     qU = distributions.MultivariateNormal(self.mu, scale_tril=Lu)
     pU = distributions.MultivariateNormal(torch.zeros_like(self.mu), scale_tril=L)
 
@@ -354,7 +354,7 @@ class WSVGP(BaseVGP):
         if verbose:
           print('cov_diag shape:', cov_diag.shape)
         cov_diag = torch.clamp(cov_diag, min=0.0)
-        
+
         # if self.Lu_is_diagonal():
           # cov_diag = cov_diag + torch.sum((W * Lu) ** 2, dim=-1)
         # else:
@@ -362,6 +362,8 @@ class WSVGP(BaseVGP):
 
         if verbose:
           print('cov_diag shape:', cov_diag.shape)
+        # Clamp covariance to prevent numerical explosion
+        cov_diag = torch.clamp(cov_diag, min=0.0, max=100.0)
         qF = distributions.Normal(mean, cov_diag.sqrt())
     else:
         if verbose:
@@ -420,6 +422,8 @@ class WSVGP(BaseVGP):
     cov_diag = (self.kernel.sigma**2)[:, None] - torch.sum(W**2, dim=-1)
     cov_diag = torch.clamp(cov_diag, min=0.0)
     cov_diag = cov_diag + torch.sum(((W@Lu)**2), dim=-1)
+    # Clamp covariance to prevent numerical explosion
+    cov_diag = torch.clamp(cov_diag, min=0.0, max=100.0)
 
     mean = W @ (self.mu.unsqueeze(-1))
     mean = torch.squeeze(mean)
@@ -623,7 +627,7 @@ class VNNGP(SVGP):
       cov = torch.sum(self.Lu**2, dim=-1)
 
 
-    cov = torch.clamp(cov, min=1e-3)
+    cov = torch.clamp(cov, min=1e-3, max=100.0)
     scale = cov**0.5
 
     qF = distributions.Normal(mean, scale)
@@ -709,7 +713,7 @@ class VNNGP(SVGP):
     mean = mean.squeeze(-1)           # Shape: B x N x 1
 
     cov_diff = Kxx - torch.sum(W**2, dim=-1) #shape Bx N x 1
-    cov_diff = torch.clamp(cov_diff, min=1e-6) # ensure positive variance
+    cov_diff = torch.clamp(cov_diff, min=1e-6, max=100.0) # ensure positive variance
 
 
 
@@ -721,7 +725,7 @@ class VNNGP(SVGP):
     S_term = torch.sum(W2**2, dim=-1) # shape B x N x 1
     S_diff = S_diag-S_term
 
-    S_diff = torch.clamp(S_diff, min=1e-6)  # Ensure positive variance
+    S_diff = torch.clamp(S_diff, min=1e-6, max=100.0)  # Ensure positive variance
 
     if verbose:
       print('mean_diff shape:', mean_diff.shape)
