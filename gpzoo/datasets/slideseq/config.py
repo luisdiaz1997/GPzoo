@@ -33,7 +33,7 @@ GROUP_DIFF_PARAM = 10.0
 IMAGE_LOG_EVERY = 100
 
 # Loadings W transformation mode: 'softplus', 'exp', 'exp_sum', or 'projected'
-LOADINGS_MODE = 'softplus'
+LOADINGS_MODE = 'projected'
 
 SVGP_MGGP_CHECKPOINT = OUTPUT_DIR / "slideseq_mggp_svgp.pth"
 VNNGP_MGGP_CHECKPOINT = OUTPUT_DIR / "slideseq_mggp_vnngp_k=50.pth"

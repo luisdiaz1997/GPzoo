@@ -56,6 +56,7 @@ class SVGP_NSF(nn.Module):
         lu_use_cholesky: Use Cholesky initialization for Lu
         device: Target device
         seed: Random seed for reproducibility
+        loadings_mode: Loadings W transformation mode: 'softplus', 'exp', 'exp_sum', or 'projected'
 
     Example:
         >>> model = SVGP_NSF(X, Y, L=12, lengthscale=8.0)
@@ -80,8 +81,10 @@ class SVGP_NSF(nn.Module):
         lu_use_cholesky: bool = True,
         lu_rank: Optional[int] = None,
         lu_init_iters: int = 10,
+        scale_multiplier: float = 1e-6,
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
+        loadings_mode: str = "softplus",
     ):
         super().__init__()
 
@@ -111,14 +114,12 @@ class SVGP_NSF(nn.Module):
         if Lu_base.dim() == 2:
             Lu_base = Lu_base.unsqueeze(0)
         Lu = Lu_base.expand(L, -1, -1).contiguous()
-        Lu_param = _log_diagonals(Lu) if lu_use_cholesky else Lu
+        Lu_param = _log_diagonals(scale_multiplier * Lu) if lu_use_cholesky else scale_multiplier * Lu
         gp.Lu = nn.Parameter(Lu_param.clone().detach())
         gp.mu = nn.Parameter(_init_mu_from_lu(Lu_base.squeeze(0), L, gp.Lu.device, seed))
 
-        # Create NSF likelihood wrapper
-        self._model = NSF2(gp, Y, L=L)
-        D = Y.shape[0]
-        self._model.W = nn.Parameter(torch.randn(D, L, device=Y.device, dtype=Y.dtype))
+        # Create NSF likelihood wrapper with loadings_mode
+        self._model = NSF2(gp, Y, L=L, loadings_mode=loadings_mode)
 
         if V is None:
             V = torch.ones(Y.shape[1], dtype=Y.dtype, device=Y.device)
@@ -134,11 +135,11 @@ class SVGP_NSF(nn.Module):
 
     @property
     def W(self):
-        return self._model.W
+        return self._model.W.value
 
     @W.setter
     def W(self, value):
-        self._model.W = value
+        self._model.W._raw.data = value
 
     @property
     def V(self):
@@ -173,6 +174,10 @@ class SVGP_NSF(nn.Module):
     def load_state_dict(self, state_dict, strict=True):
         return self._model.load_state_dict(state_dict, strict=strict)
 
+    def project_parameters(self):
+        """Apply projection to parameters if using projected mode."""
+        self._model.project_parameters()
+
 
 class VNNGP_NSF(nn.Module):
     """
@@ -196,6 +201,7 @@ class VNNGP_NSF(nn.Module):
         precompute_knn: Whether to precompute KNN indices
         device: Target device
         seed: Random seed for reproducibility
+        loadings_mode: Loadings W transformation mode: 'softplus', 'exp', 'exp_sum', or 'projected'
 
     Example:
         >>> model = VNNGP_NSF(X, Y, L=12, K=50, lengthscale=8.0)
@@ -221,10 +227,12 @@ class VNNGP_NSF(nn.Module):
         kernel_type: Literal["matern32", "rbf"] = "matern32",
         lu_rank: Optional[int] = None,
         lu_init_iters: int = 10,
+        scale_multiplier: float = 1e-6,
         subset_step: int = 10,
         precompute_knn: bool = True,
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
+        loadings_mode: str = "softplus",
     ):
         super().__init__()
 
@@ -250,14 +258,15 @@ class VNNGP_NSF(nn.Module):
         if Lu_base.dim() == 2:
             Lu_base = Lu_base.unsqueeze(0)
         Lu = Lu_base.expand(L, -1, -1).contiguous()
-        gp.Lu = nn.Parameter(Lu.clone().detach())
+        gp.Lu = nn.Parameter((scale_multiplier * Lu).clone().detach())
         gp.mu = nn.Parameter(_init_mu_from_lu(Lu_base.squeeze(0), L, gp.Lu.device, seed))
 
         # Create NSF likelihood wrapper
         self._model = NSF2(gp, Y, L=L)
+        self._model.projection_mode = loadings_mode  # Use specified loadings mode
         self._model.prior.K = K
         D = Y.shape[0]
-        self._model.W = nn.Parameter(torch.randn(D, L, device=Y.device, dtype=Y.dtype))
+        self._model.W = nn.Parameter(torch.rand(D, L, device=Y.device, dtype=Y.dtype))
 
         if V is None:
             V = torch.ones(Y.shape[1], dtype=Y.dtype, device=Y.device)
@@ -280,11 +289,11 @@ class VNNGP_NSF(nn.Module):
 
     @property
     def W(self):
-        return self._model.W
+        return self._model.W.value
 
     @W.setter
     def W(self, value):
-        self._model.W = value
+        self._model.W._raw.data = value
 
     @property
     def V(self):
@@ -318,6 +327,10 @@ class VNNGP_NSF(nn.Module):
 
     def load_state_dict(self, state_dict, strict=True):
         return self._model.load_state_dict(state_dict, strict=strict)
+
+    def project_parameters(self):
+        """Apply projection to parameters if using projected mode."""
+        self._model.project_parameters()
 
 
 class MGGP_SVGP_NSF(nn.Module):
@@ -344,6 +357,7 @@ class MGGP_SVGP_NSF(nn.Module):
         inducing_method: "kmeans" or "random"
         device: Target device
         seed: Random seed for reproducibility
+        loadings_mode: Loadings W transformation mode: 'softplus', 'exp', 'exp_sum', or 'projected'
 
     Example:
         >>> model = MGGP_SVGP_NSF(X, Y, groupsX, L=12, lengthscale=8.0)
@@ -370,9 +384,11 @@ class MGGP_SVGP_NSF(nn.Module):
         jitter: float = 1e-5,
         kernel_type: Literal["matern32", "rbf"] = "matern32",
         lu_use_cholesky: bool = True,
+        scale_multiplier: float = 1e-6,
         inducing_method: Literal["kmeans", "random"] = "kmeans",
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
+        loadings_mode: str = "softplus",
     ):
         super().__init__()
 
@@ -412,14 +428,12 @@ class MGGP_SVGP_NSF(nn.Module):
         if Lu_base.dim() == 2:
             Lu_base = Lu_base.unsqueeze(0)
         Lu = Lu_base.expand(L, -1, -1).contiguous()
-        Lu_param = _log_diagonals(Lu) if lu_use_cholesky else Lu
+        Lu_param = _log_diagonals(scale_multiplier * Lu) if lu_use_cholesky else scale_multiplier * Lu
         gp.Lu = nn.Parameter(Lu_param.clone().detach())
         gp.mu = nn.Parameter(_init_mu_from_lu(Lu_base.squeeze(0), L, gp.Lu.device, seed))
 
-        # Create NSF likelihood wrapper
-        self._model = NSF2(gp, Y, L=L)
-        D = Y.shape[0]
-        self._model.W = nn.Parameter(torch.randn(D, L, device=Y.device, dtype=Y.dtype))
+        # Create NSF likelihood wrapper with loadings_mode
+        self._model = NSF2(gp, Y, L=L, loadings_mode=loadings_mode)
 
         if V is None:
             V = torch.ones(Y.shape[1], dtype=Y.dtype, device=Y.device)
@@ -435,11 +449,11 @@ class MGGP_SVGP_NSF(nn.Module):
 
     @property
     def W(self):
-        return self._model.W
+        return self._model.W.value
 
     @W.setter
     def W(self, value):
-        self._model.W = value
+        self._model.W._raw.data = value
 
     @property
     def V(self):
@@ -474,6 +488,10 @@ class MGGP_SVGP_NSF(nn.Module):
     def load_state_dict(self, state_dict, strict=True):
         return self._model.load_state_dict(state_dict, strict=strict)
 
+    def project_parameters(self):
+        """Apply projection to parameters if using projected mode."""
+        self._model.project_parameters()
+
 
 class MGGP_VNNGP_NSF(nn.Module):
     """
@@ -500,6 +518,7 @@ class MGGP_VNNGP_NSF(nn.Module):
         precompute_knn: Whether to precompute KNN indices
         device: Target device
         seed: Random seed for reproducibility
+        loadings_mode: Loadings W transformation mode: 'softplus', 'exp', 'exp_sum', or 'projected'
 
     Example:
         >>> model = MGGP_VNNGP_NSF(X, Y, groupsX, L=12, K=50, lengthscale=8.0)
@@ -528,10 +547,12 @@ class MGGP_VNNGP_NSF(nn.Module):
         V: Optional[torch.Tensor] = None,
         jitter: float = 1e-5,
         kernel_type: Literal["matern32", "rbf"] = "matern32",
+        scale_multiplier: float = 1e-6,
         subset_step: int = 10,
         precompute_knn: bool = True,
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
+        loadings_mode: str = "softplus",
     ):
         super().__init__()
 
@@ -565,14 +586,15 @@ class MGGP_VNNGP_NSF(nn.Module):
         if Lu_base.dim() == 2:
             Lu_base = Lu_base.unsqueeze(0)
         Lu = Lu_base.expand(L, -1, -1).contiguous()
-        gp.Lu = nn.Parameter(Lu.clone().detach())
+        gp.Lu = nn.Parameter((scale_multiplier * Lu).clone().detach())
         gp.mu = nn.Parameter(_init_mu_from_lu(Lu_base.squeeze(0), L, gp.Lu.device, seed))
 
         # Create NSF likelihood wrapper
         self._model = NSF2(gp, Y, L=L)
+        self._model.projection_mode = loadings_mode  # Use specified loadings mode
         self._model.prior.K = K
         D = Y.shape[0]
-        self._model.W = nn.Parameter(torch.randn(D, L, device=Y.device, dtype=Y.dtype))
+        self._model.W = nn.Parameter(torch.rand(D, L, device=Y.device, dtype=Y.dtype))
 
         if V is None:
             V = torch.ones(Y.shape[1], dtype=Y.dtype, device=Y.device)
@@ -595,11 +617,11 @@ class MGGP_VNNGP_NSF(nn.Module):
 
     @property
     def W(self):
-        return self._model.W
+        return self._model.W.value
 
     @W.setter
     def W(self, value):
-        self._model.W = value
+        self._model.W._raw.data = value
 
     @property
     def V(self):
@@ -633,3 +655,7 @@ class MGGP_VNNGP_NSF(nn.Module):
 
     def load_state_dict(self, state_dict, strict=True):
         return self._model.load_state_dict(state_dict, strict=strict)
+
+    def project_parameters(self):
+        """Apply projection to parameters if using projected mode."""
+        self._model.project_parameters()

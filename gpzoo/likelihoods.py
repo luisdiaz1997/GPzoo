@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch
 
 from torch.distributions import constraints, transform_to
+from .modules import PositiveParameter
 
 class GaussianLikelihood(nn.Module):
   def __init__(self, gp, noise=0.1):
@@ -87,48 +88,31 @@ class PoissonFactorization(nn.Module):
   '''
   Poisson Factorization base model for both PNMF, and NSF
   '''
-  def __init__(self, prior, y, L=10):
+  def __init__(self, prior, y, L=10, loadings_mode='softplus'):
     super().__init__()
     D, N = y.shape
     self.prior = prior
-    self.W = nn.Parameter(torch.rand((D, L)))
+    self.loadings_mode = loadings_mode
+    # Use PositiveParameter for loadings W
+    self.W = PositiveParameter((D, L), init_value=1.0, mode=loadings_mode)
 
-  def get_rate(self, prior_samples, idy=None, mode='softplus', return_log=False):
-    
+  def get_rate(self, prior_samples, idy=None):
+    F = torch.exp(prior_samples)  # shape ExLxN
 
     if idy is not None:
-      W=self.W[idy]
+      W = self.W.value[idy]
     else:
-      W = self.W
-      
-    if mode=='softplus':
-      # F = torch.nn.functional.softplus(prior_samples) #shape ExLxN
-      F = torch.exp(prior_samples) #shape ExLxN
-      W = torch.nn.functional.softplus(W)
-      Z = torch.matmul(W, F) #shape ExDxN
+      W = self.W.value
 
-    elif mode=='exp':
-      F = torch.exp(prior_samples) #shape ExLxN
-      W = torch.exp(W)
-      Z = torch.matmul(W, F) #shape ExDxN
-
-    elif mode=='exp_sum':
-      F = prior_samples #shape ExLxN
-
-
-      if F.ndim == 2:
-        WF_sum = W[:, :, None] + F[None, :, :]
-      else:
-        WF_sum =  W[None:, :, None] + F[:, None,:, :]
-
-      log_Z = torch.logsumexp(WF_sum, dim=-2)
-
-      if return_log:
-        return log_Z
-      
-      Z = torch.exp(log_Z)
+    # W is already positive from PositiveParameter
+    Z = torch.matmul(W, F)  # shape ExDxN
 
     return Z
+
+  def project_parameters(self):
+    """Apply projection to parameters (clamp negative values to zero)."""
+    # PositiveParameter handles projection internally
+    self.W.project()
 
 
 class PNMF(PoissonFactorization):
@@ -150,8 +134,8 @@ class PNMF(PoissonFactorization):
     return pY, qF, pF
   
 class NSF2(PoissonFactorization):
-  def __init__(self, gp, y, L=10):
-    super().__init__(prior=gp, y=y, L=L)
+  def __init__(self, gp, y, L=10, loadings_mode='softplus'):
+    super().__init__(prior=gp, y=y, L=L, loadings_mode=loadings_mode)
     D, N = y.shape
     self.V = nn.Parameter(torch.ones((N,)))
 
@@ -175,11 +159,11 @@ class NSF2(PoissonFactorization):
 
     return pY, qF, qU, pU
   
-  def forward_batched_train(self, X, idx, idy=None, E=10, verbose=False, mode='softplus', **kwargs):
+  def forward_batched_train(self, X, idx, idy=None, E=10, verbose=False, **kwargs):
     '''X should be batched already, this is just for V'''
     qF, qU, pU = self.prior.forward_train(X=X, idx=idx, verbose=verbose, **kwargs)
     F = qF.rsample((E,))
-    Z = self.get_rate(F, idy=idy, mode=mode)
+    Z = self.get_rate(F, idy=idy)
     V = torch.nn.functional.softplus(self.V[idx])
     pY = distributions.Poisson(V*Z)
 
