@@ -102,6 +102,8 @@ def _train_main() -> None:
         LOADINGS_MODE,
         LR,
         LR_LENGTHSCALE,
+        LR_LOADING,
+        LR_MEAN,
         LR_SCALE,
         SCALE_MULTIPLIER,
         SCALE_TRAIN_AFTER,
@@ -146,15 +148,28 @@ def _train_main() -> None:
 
     freeze_svgp_kernel_and_inputs(model)
 
-    # Prepare frozen scale and lengthscale parameters
-    from gpzoo.training_utilities import prepare_frozen_scale_and_lengthscale_params
-    scale_params, other_params, lengthscale_param = prepare_frozen_scale_and_lengthscale_params(model)
+    # Prepare parameter groups with separate learning rates
+    from gpzoo.training_utilities import prepare_frozen_params
+    param_dict = prepare_frozen_params(model)
 
-    # Add all params to optimizer, but scale_params start with lr=0 (frozen)
-    param_groups = [
-        {"params": other_params, "lr": LR},
-        {"params": scale_params, "lr": 0.0},  # Start frozen with lr=0
-    ]
+    # Build optimizer param groups with specific learning rates
+    param_groups = []
+
+    # Mean parameters (mu) - LR_MEAN
+    if param_dict['mean_params']:
+        param_groups.append({"params": param_dict['mean_params'], "lr": LR_MEAN})
+
+    # Loading parameters (W) - LR_LOADING
+    if param_dict['loading_params']:
+        param_groups.append({"params": param_dict['loading_params'], "lr": LR_LOADING})
+
+    # Other parameters - base LR
+    if param_dict['other_params']:
+        param_groups.append({"params": param_dict['other_params'], "lr": LR})
+
+    # Scale parameters (Lu) - start frozen with lr=0
+    if param_dict['scale_params']:
+        param_groups.append({"params": param_dict['scale_params'], "lr": 0.0})
 
     # Use Adam optimizer
     optimizer = optim.Adam(param_groups)
@@ -185,10 +200,10 @@ def _train_main() -> None:
         x_batch_size=X_BATCH,
         y_batch_size=Y_BATCH,
         lengthscale_unfreeze_step=LENGTHSCALE_TRAIN_AFTER,
-        lengthscale_param=lengthscale_param,
+        lengthscale_param=param_dict['lengthscale_param'],
         lengthscale_lr=LR_LENGTHSCALE,
         scale_unfreeze_step=SCALE_TRAIN_AFTER,
-        scale_params=scale_params,
+        scale_params=param_dict['scale_params'],
         scale_lr=LR_SCALE,
         writer=writer,
         progress_desc=f"VNNGP (slideseq)",

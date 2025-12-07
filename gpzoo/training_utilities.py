@@ -743,3 +743,58 @@ def prepare_frozen_scale_and_lengthscale_params(model):
             other_params.append(param)
 
     return scale_params, other_params, lengthscale_param
+
+
+def prepare_frozen_params(model):
+    """
+    Prepare parameter groups with separate learning rates for scale (Lu), lengthscale, mean (mu), and loadings (W).
+
+    This function separates parameters into groups that can have different learning rates:
+    1. Freezes the lengthscale parameter if it exists
+    2. Separates scale parameters (Lu) and freezes them initially
+    3. Separates mean parameters (mu)
+    4. Separates loading parameters (W)
+    5. Collects remaining parameters
+
+    Args:
+        model: The model whose parameters to prepare
+
+    Returns:
+        dict: Dictionary containing:
+            - 'scale_params': List of Lu parameters (frozen)
+            - 'mean_params': List of mu parameters
+            - 'loading_params': List of W parameters
+            - 'other_params': List of other trainable parameters
+            - 'lengthscale_param': The lengthscale parameter (frozen) or None
+    """
+    # Freeze lengthscale parameter
+    lengthscale_param = getattr(model.prior.kernel, "lengthscale", None)
+    if lengthscale_param is not None:
+        lengthscale_param.requires_grad = False
+
+    # Separate parameters into groups
+    scale_params = []
+    mean_params = []
+    loading_params = []
+    other_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "Lu" in name:
+            param.requires_grad = False  # Freeze initially
+            scale_params.append(param)
+        elif "mu" in name:
+            mean_params.append(param)
+        elif "W" in name:
+            loading_params.append(param)
+        else:
+            other_params.append(param)
+
+    return {
+        'scale_params': scale_params,
+        'mean_params': mean_params,
+        'loading_params': loading_params,
+        'other_params': other_params,
+        'lengthscale_param': lengthscale_param
+    }
