@@ -16,22 +16,30 @@ from sklearn.cluster import KMeans
 def init_loadings(
     Y: torch.Tensor,
     L: int,
-    mode: str = "pca",
+    mode: str = "svd",
     seed: Optional[int] = None,
+    return_factors: bool = False,
 ) -> torch.Tensor:
     """
-    Initialize loadings matrix W from data.
+    Initialize loadings matrix W (and optionally factors F) from data.
+    
+    For SVD mode (default), decomposes Y = U @ S @ V.T without centering:
+        W = U @ S^{1/2}  (shape D, L)
+        F = S^{1/2} @ V.T  (shape L, N)
     
     Args:
         Y: Gene expression counts, shape (D, N) where D=genes, N=cells
         L: Number of latent factors
-        mode: 'pca' (default, faster) or 'nmf'
+        mode: 'svd' (default), 'pca', or 'nmf'
         seed: Random seed for reproducibility
+        return_factors: If True, also return F for initializing GP mean (useful for VNNGP)
     
     Returns:
         W_init: Initialized loadings, shape (D, L), non-negative
+        F_init: (only if return_factors=True) Factors in log-space, shape (L, N)
+                Ready to initialize GP mu as log(F + eps)
     """
-    import numpy as np
+
     
     Y_np = Y.detach().cpu().numpy().astype(np.float64)
     D, N = Y_np.shape
@@ -39,40 +47,75 @@ def init_loadings(
     if seed is not None:
         np.random.seed(seed)
     
-    if mode == "pca":
-        from sklearn.decomposition import PCA
+    if mode == "svd":
+        # Use truncated SVD for efficiency with large matrices
+        from sklearn.utils.extmath import randomized_svd
+
+        # randomized_svd returns truncated U, S, Vt directly
+        # This is much more efficient than full SVD for large matrices
+        U_L, S_L, Vt_L = randomized_svd(Y_np, n_components=L, random_state=seed)
+        # U_L: (D, L), S_L: (L,), Vt_L: (L, N)
+
+        S_sqrt = np.sqrt(S_L)
+
+        # W = U @ S^{1/2}
+        W_init = U_L * S_sqrt[np.newaxis, :]  # (D, L)
+
+        # F = S^{1/2} @ V.T
+        F_init = S_sqrt[:, np.newaxis] * Vt_L  # (L, N)
         
-        # PCA expects (n_samples, n_features), so transpose: (N, D)
-        # We want components that explain variance across cells
-        pca = PCA(n_components=L, random_state=seed)
-        pca.fit(Y_np.T)  # Fit on (N, D)
-        
-        # components_ is (L, D), we want (D, L)
-        W_init = pca.components_.T
-        
-        # Clamp to non-negative
+        # Clamp W to non-negative
         W_init = np.maximum(W_init, 0.0)
         
-        # Handle case where clamping zeros out entire factors
-        # Add small noise to zero columns
-        col_sums = W_init.sum(axis=0)
-        zero_cols = col_sums < 1e-10
+        # Handle zero columns
+        col_norms = np.linalg.norm(W_init, axis=0)
+        zero_cols = col_norms < 1e-10
         if zero_cols.any():
-            W_init[:, zero_cols] = np.abs(np.random.randn(D, zero_cols.sum())) * 0.01
+            n_zero = zero_cols.sum()
+            W_init[:, zero_cols] = np.abs(np.random.randn(D, n_zero)) * 0.01
+        
+        # F needs to be positive for log transform, clamp then log
+        F_init = np.maximum(F_init, 1e-6)
+        F_log = np.log(F_init)
+    
+    elif mode == "pca":
+        # PCA = SVD on centered data
+        from sklearn.utils.extmath import randomized_svd
+
+        Y_mean = Y_np.mean(axis=1, keepdims=True)
+        Y_centered = Y_np - Y_mean
+
+        # Use truncated SVD for efficiency
+        U_L, S_L, Vt_L = randomized_svd(Y_centered, n_components=L, random_state=seed)
+        # U_L: (D, L), S_L: (L,), Vt_L: (L, N)
+
+        S_sqrt = np.sqrt(S_L)
+
+        # W = U @ S^{1/2}
+        W_init = U_L * S_sqrt[np.newaxis, :]  # (D, L)
+
+        # F = S^{1/2} @ V.T (from centered data)
+        F_init = S_sqrt[:, np.newaxis] * Vt_L  # (L, N)
+
+        # Clamp W to non-negative
+        W_init = np.maximum(W_init, 0.0)
+
+        # Handle zero columns
+        col_norms = np.linalg.norm(W_init, axis=0)
+        zero_cols = col_norms < 1e-10
+        if zero_cols.any():
+            n_zero = zero_cols.sum()
+            W_init[:, zero_cols] = np.abs(np.random.randn(D, n_zero)) * 0.01
+
+        # F needs to be positive for log transform, clamp then log
+        F_init = np.maximum(F_init, 1e-6)
+        F_log = np.log(F_init)
     
     elif mode == "nmf":
         from sklearn.decomposition import NMF
         
-        # NMF needs non-negative input
         Y_nn = np.maximum(Y_np, 0.0)
         
-        # NMF expects (n_samples, n_features), so transpose: (N, D)
-        # But we want W (D, L), so we fit on (D, N) and take components
-        # Actually: Y ≈ W @ H where Y is (D, N), W is (D, L), H is (L, N)
-        # sklearn NMF: X ≈ W @ H where X is (n_samples, n_features)
-        # So fit on Y.T (N, D) gives us H.T (D, L) as the loadings
-        
-        # Alternative: fit on Y (D, N) directly
         nmf = NMF(
             n_components=L,
             init='nndsvda',
@@ -80,17 +123,22 @@ def init_loadings(
             random_state=seed,
         )
         W_init = nmf.fit_transform(Y_nn)  # (D, L)
+        F_init = nmf.components_  # (L, N) - already non-negative
+        
+        F_init = np.maximum(F_init, 1e-6)
+        F_log = np.log(F_init)
     
     else:
-        raise ValueError(f"Unknown mode: {mode}. Choose 'pca' or 'nmf'")
+        raise ValueError(f"Unknown mode: {mode}. Choose 'svd', 'pca', or 'nmf'")
     
-    # Scale to reasonable magnitude
-    # Normalize so each factor has unit norm, then scale
-    norms = np.linalg.norm(W_init, axis=0, keepdims=True)
-    norms = np.maximum(norms, 1e-10)
-    W_init = W_init / norms
+    W_out = torch.tensor(W_init, dtype=Y.dtype, device=Y.device)
     
-    return torch.tensor(W_init, dtype=Y.dtype, device=Y.device)
+    if return_factors:
+        F_out = torch.tensor(F_log, dtype=Y.dtype, device=Y.device)
+        return W_out, F_out
+    
+    return W_out
+
 
 
 def _default_device(reference: torch.Tensor, device: Optional[torch.device]) -> torch.device:

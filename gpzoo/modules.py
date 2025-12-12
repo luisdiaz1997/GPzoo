@@ -332,3 +332,235 @@ class PositiveParameter(ConstrainedParameter):
     def __repr__(self):
         grad_str = ", requires_grad=True" if self._raw.requires_grad else ""
         return f"PositiveParameter(shape={self._shape}, mode='{self.mode}'{grad_str})"
+
+
+class LowRankFactor(ConstrainedParameter):
+    """
+    Low-rank factor V for constructing VV^T.
+    
+    Optionally supports semi-orthogonal constraint via SVD projection.
+    
+    Args:
+        size: (M, K) or (L, M, K) for batched.
+        orthogonal: If True, project to semi-orthogonal after updates.
+    """
+    
+    def __init__(
+        self, 
+        size: Tuple[int, ...],
+        orthogonal: bool = False,
+        scale: float = 0.1
+    ):
+        if len(size) == 2:
+            self.m, self.rank = size
+            self.batch_size = None
+            shape = size
+        else:
+            self.batch_size, self.m, self.rank = size
+            shape = size
+        
+        self.orthogonal = orthogonal
+        self.scale = scale
+        
+        super().__init__(shape, mode='none')
+        self._raw = nn.Parameter(self._init_raw())
+    
+    def _init_raw(self) -> torch.Tensor:
+        # Initialize small so VV^T starts near zero
+        raw = torch.randn(self._shape) * self.scale / (self.rank ** 0.5)
+        return raw
+
+    
+    def _to_constrained(self, raw: torch.Tensor) -> torch.Tensor:
+        # No constraint by default, just return raw
+        return raw
+    
+    def _to_unconstrained(self, constrained: torch.Tensor) -> torch.Tensor:
+        return constrained
+    
+    def project(self):
+        """Project to semi-orthogonal if enabled."""
+        if self.orthogonal:
+            with torch.no_grad():
+                U, _, Vh = torch.linalg.svd(self._raw.data, full_matrices=False)
+                self._raw.data = U @ Vh
+    
+    def __repr__(self):
+        shape_str = f"({self.m}, {self.rank})" if self.batch_size is None else f"({self.batch_size}, {self.m}, {self.rank})"
+        return f"LowRankFactor(size={shape_str}, orthogonal={self.orthogonal})"
+
+
+class LowRankPlusDiagonal(nn.Module):
+    """
+    Covariance S = D + VV^T composed from PositiveParameter and LowRankFactor.
+    
+    Args:
+        m: Dimension M
+        rank: Rank R of low-rank component
+        batch_size: Optional batch dimension L
+        diag_mode: 'softplus' or 'exp' for diagonal
+    """
+    
+    def __init__(
+        self,
+        m: int,
+        rank: int = None,
+        batch_size: int = None,
+        diag_mode: str = 'softplus'
+    ):
+        super().__init__()
+        self.m = m
+        self.rank = rank if rank is not None else min(m, 10)
+        self.batch_size = batch_size
+        
+        # Component parameters
+        diag_shape = (m,) if batch_size is None else (batch_size, m)
+        V_shape = (m, self.rank) if batch_size is None else (batch_size, m, self.rank)
+        
+        self.diag = PositiveParameter(diag_shape, mode=diag_mode)
+        self.V = LowRankFactor(V_shape)
+    
+    @property
+    def data(self) -> torch.Tensor:
+        """Compute S = D + VV^T."""
+        D = self.diag.data
+        V = self.V.data
+        return torch.diag_embed(D) + V @ V.transpose(-2, -1)
+    
+    @property
+    def D(self) -> torch.Tensor:
+        """Diagonal component."""
+        return self.diag.data
+    
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        if self.batch_size is None:
+            return (self.m, self.m)
+        return (self.batch_size, self.m, self.m)
+    
+    def get_block(self, indices: torch.Tensor) -> torch.Tensor:
+        """Extract S[indices, indices]."""
+        D = self.D
+        V = self.V.data
+        
+        if self.batch_size is None:
+            D_block = D[indices]
+            V_block = V[indices]
+        else:
+            D_block = D[:, indices]
+            V_block = V[:, indices]
+        
+        return torch.diag_embed(D_block) + V_block @ V_block.transpose(-2, -1)
+    
+    def get_precision_components(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute components for precision via Woodbury.
+        
+        Returns:
+            D_inv: (..., M)
+            Psi_cholesky: (..., K, K) where Ψ = I + V^T D^{-1} V
+        """
+        D = self.D
+        V = self.V.data
+        D_inv = 1.0 / D
+        
+        V_scaled = V * D_inv.unsqueeze(-1)
+        Psi = torch.eye(self.rank, device=V.device, dtype=V.dtype)
+        if self.batch_size is not None:
+            Psi = Psi.unsqueeze(0).expand(self.batch_size, -1, -1)
+        Psi = Psi + V_scaled.transpose(-2, -1) @ V_scaled
+        Psi_cholesky = torch.linalg.cholesky(Psi)
+        
+        return D_inv, Psi_cholesky
+    
+    def get_precision_diagonal(self, D_inv: torch.Tensor, Psi_cholesky: torch.Tensor, idx: torch.Tensor = None) -> torch.Tensor:
+        """Θ_jj = d_j^{-1} - d_j^{-2} V_j Ψ^{-1} V_j^T"""
+        V = self.V.data
+        if idx is not None:
+            V = V[:,idx]
+            D_inv = D_inv[:, idx]        
+        V_right = torch.linalg.solve_triangular(Psi_cholesky, V.transpose(-2, -1), upper=False)
+        quad_term = (V_right).sum(dim=-2)
+        
+        return D_inv - (D_inv ** 2) * quad_term
+
+    
+    def get_conditional_variance(self,  D_inv: torch.Tensor = None, Psi_cholesky: torch.Tensor = None, idx: torch.Tensor = None) -> torch.Tensor:
+        """τ̃_j² = Θ_jj^{-1}"""
+        if  Psi_cholesky is None or D_inv is None:
+            D_inv, Psi_cholesky = self.get_precision_components()
+        return 1.0 / self.get_precision_diagonal(D_inv=D_inv, Psi_cholesky=Psi_cholesky, idx=idx)
+    
+    def get_conditional_params(
+        self, 
+        knn_idx: torch.Tensor,
+        D_inv: torch.Tensor = None, 
+        Psi_cholesky: torch.Tensor = None, 
+        idx: torch.Tensor = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute τ̃_j² and α_j sharing intermediate computations.
+        
+        Let W = L_Ψ^{-1} V^T (computed once for all M).
+        Then:
+            Θ_jj = d_j^{-1} - d_j^{-2} ||W_j||²
+            τ̃_j² = Θ_jj^{-1}
+            α_j^T = τ̃_j² * d_j^{-1} * W_j^T W_{n(j)} * D_{n(j)}^{-1}
+        
+        Args:
+            knn_idx: (M, K_neighbors) neighbor indices
+            D_inv: Precomputed 1/D
+            Psi_cholesky: Precomputed L_Ψ where Ψ = L_Ψ L_Ψ^T
+            idx: Optional subset indices
+            
+        Returns:
+            tau_tilde_sq: (..., M') conditional variances  
+            alpha: (..., M', K_neighbors) regression coefficients
+        """
+        if Psi_cholesky is None or D_inv is None:
+            D_inv, Psi_cholesky = self.get_precision_components()
+        
+        V = self.V.data  # (..., M, K)
+
+        if idx is not None:
+            # fix for unbatched later
+            V = V[:,idx]
+            D_inv = D_inv[:, idx]
+        
+        # Compute W = L_Ψ^{-1} V^T 
+        # Shape: (..., K, M)
+        W_T = torch.linalg.solve_triangular(
+            Psi_cholesky,
+            V.transpose(-2, -1),
+            upper=False
+        )
+        W = W_T.transpose(-2, -1)
+        
+        
+        # τ̃_j²: need ||W_j||² for each j
+        W_sq_sum = (W ** 2).sum(dim=-1)  # (..., M)
+        Theta_diag = D_inv - (D_inv ** 2) * W_sq_sum
+        tau_tilde_sq = 1.0 / Theta_diag
+        
+        # α_j: need W_j^T @ W_{n(j)} for each j
+       
+        W_neighbors = W[:, knn_idx]  # (L, M', K_neighbors, K)
+        D_inv_neighbors = D_inv[:, knn_idx]  # (L, M', K_neighbors)
+        
+        cross = torch.einsum('lkm,lkmn->lmn', W_j, W_neighbors)
+        
+        alpha = tau_tilde_sq.unsqueeze(-1) * D_inv_j.unsqueeze(-1) * cross * D_inv_neighbors
+        
+        return tau_tilde_sq, alpha
+    
+    def freeze(self):
+        self.diag.freeze()
+        self.V.freeze()
+    
+    def unfreeze(self):
+        self.diag.unfreeze()
+        self.V.unfreeze()
+    
+    def __repr__(self):
+        shape_str = f"{self.m}" if self.batch_size is None else f"({self.batch_size}, {self.m})"
+        return f"LowRankPlusDiagonal(size={shape_str}, rank={self.rank})"

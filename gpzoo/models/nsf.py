@@ -32,6 +32,7 @@ from ..model_utilities import (
     mggp_kmeans_inducing_points,
     _init_mu_from_lu,
     _default_device,
+    init_loadings,
 )
 from ..modules import CholeskyParameter
 
@@ -53,7 +54,7 @@ class NSF_Model(nn.Module, ABC):
     
     def __init__(self):
         super().__init__()
-        self._model: NSF2 = None  # Set by subclass in _build_model
+        self._model: NSF2 = None
     
     # -------------------------------------------------------------------------
     # Properties (common to all models)
@@ -143,6 +144,25 @@ class NSF_Model(nn.Module, ABC):
         if V is None:
             V = torch.ones(Y.shape[1], dtype=Y.dtype, device=Y.device)
         return nn.Parameter(V.clone())
+    
+    def _init_loadings(
+        self,
+        Y: torch.Tensor,
+        L: int,
+        loadings_init: str,
+        seed: Optional[int],
+        init_mu_from_factors: bool = False,
+    ):
+        """Initialize W from data, optionally initialize GP mu from factors."""
+        if loadings_init in ("svd", "pca", "nmf"):
+            if init_mu_from_factors:
+                W_init, F_init = init_loadings(Y, L, mode=loadings_init, seed=seed, return_factors=True)
+                self._model.W.data = W_init
+                return F_init  # Return for caller to use
+            else:
+                W_init = init_loadings(Y, L, mode=loadings_init, seed=seed, return_factors=False)
+                self._model.W.data = W_init
+        return None
     
     def _init_lu_for_svgp(
         self,
@@ -235,31 +255,6 @@ class NSF_Model(nn.Module, ABC):
 class SVGP_NSF(NSF_Model):
     """
     Sparse Variational GP with NSF (Poisson) likelihood.
-
-    This is the standard SVGP model for spatial transcriptomics data.
-    Suitable for datasets up to ~50k cells with ~4k inducing points.
-
-    Args:
-        X: Spatial coordinates, shape (N, D)
-        Y: Gene expression counts, shape (genes, N)
-        L: Number of latent factors
-        lengthscale: RBF/Matern kernel lengthscale
-        sigma: Kernel variance (default 1.0)
-        num_inducing: Number of inducing points (default: min(4000, N))
-        inducing_points: Optional pre-specified inducing points
-        V: Optional size factors, shape (N,)
-        jitter: Numerical stability term
-        kernel_type: "matern32" or "rbf"
-        cholesky_mode: 'exp' or 'softplus' for Lu diagonal constraint
-        diagonal_only: If True, use diagonal covariance for Lu
-        device: Target device
-        seed: Random seed for reproducibility
-        loadings_mode: Loadings W transformation mode
-
-    Example:
-        >>> model = SVGP_NSF(X, Y, L=12, lengthscale=8.0)
-        >>> model.to("cuda")
-        >>> pY, qF, qZ, pZ = model.forward_batched_train(X_batch, idx=batch_idx)
     """
     
     _is_mggp = False
@@ -285,12 +280,12 @@ class SVGP_NSF(NSF_Model):
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
         loadings_mode: str = "softplus",
+        loadings_init: str = "pca",
     ):
         super().__init__()
 
         kernel = self._get_kernel_cls(kernel_type, is_mggp=False)(sigma=sigma, lengthscale=lengthscale)
 
-        # Inducing points
         if inducing_points is None:
             num_inducing = num_inducing or min(4000, X.shape[0])
             Z = X[:num_inducing].clone()
@@ -298,53 +293,28 @@ class SVGP_NSF(NSF_Model):
             Z = inducing_points.clone()
         M = Z.shape[0]
 
-        # Create GP
         gp = SVGP(kernel, M=M, jitter=jitter, cholesky_mode=cholesky_mode, diagonal_only=diagonal_only)
         gp.Z = nn.Parameter(Z, requires_grad=False)
 
-        # Initialize Lu
         self._init_lu_for_svgp(
             gp, kernel, Z, L, M, lu_rank, lu_init_iters,
             scale_multiplier, jitter, cholesky_mode, diagonal_only, seed
         )
 
-        # Create model
         self._model = NSF2(gp, Y, L=L, loadings_mode=loadings_mode)
         self._model.V = self._init_size_factors(Y, V)
+
+        # Initialize loadings from data
+        self._init_loadings(Y, L, loadings_init, seed, init_mu_from_factors=False)
+
         self._model.to(_default_device(X, device))
 
 
 class VNNGP_NSF(NSF_Model):
     """
     Variational Nearest-Neighbor GP with NSF (Poisson) likelihood.
-
-    Uses K-nearest neighbor sparsity for scalability to large datasets.
-    Suitable for datasets with 100k+ cells.
-
-    Args:
-        X: Spatial coordinates, shape (N, D)
-        Y: Gene expression counts, shape (genes, N)
-        L: Number of latent factors
-        K: Number of nearest neighbors for sparse approximation
-        lengthscale: RBF/Matern kernel lengthscale
-        sigma: Kernel variance (default 1.0)
-        num_inducing: Number of inducing points (default: N)
-        inducing_points: Optional pre-specified inducing points
-        V: Optional size factors, shape (N,)
-        jitter: Numerical stability term
-        kernel_type: "matern32" or "rbf"
-        precompute_knn: Whether to precompute KNN indices
-        device: Target device
-        seed: Random seed for reproducibility
-        loadings_mode: Loadings W transformation mode
-
-    Example:
-        >>> model = VNNGP_NSF(X, Y, L=12, K=50, lengthscale=8.0)
-        >>> model.to("cuda")
-        >>> model.prior.knn_idx = full_knn_idx[batch_idx]
-        >>> pY, qF, qZ, pZ = model.forward_batched_train(X_batch, idx=batch_idx)
     """
-    
+
     _is_mggp = False
 
     def __init__(
@@ -369,29 +339,33 @@ class VNNGP_NSF(NSF_Model):
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
         loadings_mode: str = "softplus",
+        loadings_init: str = "pca",
     ):
         super().__init__()
 
         kernel = self._get_kernel_cls(kernel_type, is_mggp=False)(sigma=sigma, lengthscale=lengthscale)
 
-        # Inducing points (default: all points for VNNGP)
         Z = X.clone() if inducing_points is None else inducing_points.clone()
         M = Z.shape[0]
 
-        # Create GP
         gp = VNNGP(kernel, M=M, jitter=jitter, K=K)
         gp.Z = nn.Parameter(Z, requires_grad=True)
 
-        # Initialize Lu
         self._init_lu_for_vnngp(
             gp, kernel, X, Z, L, K, lu_rank, lu_init_iters,
             scale_multiplier, subset_step, seed
         )
 
-        # Create model
         self._model = NSF2(gp, Y, L=L, loadings_mode=loadings_mode)
         self._model.prior.K = K
         self._model.V = self._init_size_factors(Y, V)
+
+        # Initialize loadings from data and get factors for mu
+        F_init = self._init_loadings(Y, L, loadings_init, seed, init_mu_from_factors=True)
+
+        if F_init is not None:
+            # F_init is (L, N) in log-space, mu is (L, M) where M=N for VNNGP
+            self._model.prior.mu.data = F_init.to(self._model.prior.mu.device)
 
         if precompute_knn:
             self._setup_knn(X)
@@ -402,37 +376,6 @@ class VNNGP_NSF(NSF_Model):
 class MGGP_SVGP_NSF(NSF_Model):
     """
     Multi-Group SVGP with NSF (Poisson) likelihood.
-
-    Extends SVGP with group-specific kernel modulation for multi-sample
-    or multi-condition spatial transcriptomics.
-
-    Args:
-        X: Spatial coordinates, shape (N, D)
-        Y: Gene expression counts, shape (genes, N)
-        groupsX: Group assignments for each cell, shape (N,)
-        L: Number of latent factors
-        lengthscale: RBF/Matern kernel lengthscale
-        sigma: Kernel variance (default 1.0)
-        group_diff_param: Controls group similarity (higher = more different)
-        num_inducing: Number of inducing points
-        inducing_points: Optional pre-specified inducing points
-        inducing_groups: Group assignments for inducing points
-        V: Optional size factors, shape (N,)
-        jitter: Numerical stability term
-        kernel_type: "matern32" or "rbf"
-        cholesky_mode: 'exp' or 'softplus' for Lu diagonal constraint
-        diagonal_only: If True, use diagonal covariance for Lu
-        inducing_method: "kmeans" or "random"
-        device: Target device
-        seed: Random seed for reproducibility
-        loadings_mode: Loadings W transformation mode
-
-    Example:
-        >>> model = MGGP_SVGP_NSF(X, Y, groupsX, L=12, lengthscale=8.0)
-        >>> model.to("cuda")
-        >>> pY, qF, qZ, pZ = model.forward_batched_train(
-        ...     X_batch, idx=batch_idx, groupsX=groups_batch
-        ... )
     """
     
     _is_mggp = True
@@ -460,6 +403,7 @@ class MGGP_SVGP_NSF(NSF_Model):
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
         loadings_mode: str = "softplus",
+        loadings_init: str = "pca",
     ):
         super().__init__()
 
@@ -469,7 +413,6 @@ class MGGP_SVGP_NSF(NSF_Model):
             group_diff_param=group_diff_param, n_groups=n_groups
         )
 
-        # Inducing points
         if inducing_points is None or inducing_groups is None:
             num_inducing = num_inducing or min(4000, X.shape[0])
             Z, groupsZ = mggp_kmeans_inducing_points(
@@ -480,22 +423,23 @@ class MGGP_SVGP_NSF(NSF_Model):
             Z, groupsZ = inducing_points.clone(), inducing_groups.clone()
         M = Z.shape[0]
 
-        # Create GP
         gp = MGGP_SVGP(kernel, M=M, n_groups=n_groups, jitter=jitter,
                        cholesky_mode=cholesky_mode, diagonal_only=diagonal_only)
         gp.Z = nn.Parameter(Z, requires_grad=False)
         gp.groupsZ = nn.Parameter(groupsZ, requires_grad=False)
 
-        # Initialize Lu
         self._init_lu_for_svgp(
             gp, kernel, Z, L, M, None, 10,
             scale_multiplier, jitter, cholesky_mode, diagonal_only, seed,
             groupsZ=groupsZ
         )
 
-        # Create model
         self._model = NSF2(gp, Y, L=L, loadings_mode=loadings_mode)
         self._model.V = self._init_size_factors(Y, V)
+
+        # Initialize loadings from data
+        self._init_loadings(Y, L, loadings_init, seed, init_mu_from_factors=False)
+
         self._model.to(_default_device(X, device))
 
 
@@ -560,6 +504,7 @@ class MGGP_VNNGP_NSF(NSF_Model):
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
         loadings_mode: str = "softplus",
+        loadings_init: str = "pca",
     ):
         super().__init__()
 
@@ -569,29 +514,32 @@ class MGGP_VNNGP_NSF(NSF_Model):
             group_diff_param=group_diff_param, n_groups=n_groups
         )
 
-        # Inducing points (default: all points for VNNGP)
         if inducing_points is None or inducing_groups is None:
             Z, groupsZ = X.clone(), groupsX.clone()
         else:
             Z, groupsZ = inducing_points.clone(), inducing_groups.clone()
         M = Z.shape[0]
 
-        # Create GP
         gp = MGGP_VNNGP(kernel, M=M, n_groups=n_groups, jitter=jitter, K=K)
         gp.Z = nn.Parameter(Z, requires_grad=False)
         gp.groupsZ = nn.Parameter(groupsZ, requires_grad=False)
 
-        # Initialize Lu
         self._init_lu_for_vnngp(
             gp, kernel, X, Z, L, K, None, 10,
             scale_multiplier, subset_step, seed,
             groupsZ=groupsZ
         )
 
-        # Create model
         self._model = NSF2(gp, Y, L=L, loadings_mode=loadings_mode)
         self._model.prior.K = K
         self._model.V = self._init_size_factors(Y, V)
+
+        # Initialize loadings from data and get factors for mu
+        F_init = self._init_loadings(Y, L, loadings_init, seed, init_mu_from_factors=True)
+
+        if F_init is not None:
+            # F_init is (L, N) in log-space, mu is (L, M) where M=N for MGGP_VNNGP
+            self._model.prior.mu.data = F_init.to(self._model.prior.mu.device)
 
         if precompute_knn:
             self._setup_knn(X)
