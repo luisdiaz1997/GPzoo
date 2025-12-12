@@ -473,23 +473,6 @@ class LowRankPlusDiagonal(nn.Module):
         
         return D_inv, Psi_cholesky
     
-    def get_precision_diagonal(self, D_inv: torch.Tensor, Psi_cholesky: torch.Tensor, idx: torch.Tensor = None) -> torch.Tensor:
-        """Θ_jj = d_j^{-1} - d_j^{-2} V_j Ψ^{-1} V_j^T"""
-        V = self.V.data
-        if idx is not None:
-            V = V[:,idx]
-            D_inv = D_inv[:, idx]        
-        V_right = torch.linalg.solve_triangular(Psi_cholesky, V.transpose(-2, -1), upper=False)
-        quad_term = (V_right).sum(dim=-2)
-        
-        return D_inv - (D_inv ** 2) * quad_term
-
-    
-    def get_conditional_variance(self,  D_inv: torch.Tensor = None, Psi_cholesky: torch.Tensor = None, idx: torch.Tensor = None) -> torch.Tensor:
-        """τ̃_j² = Θ_jj^{-1}"""
-        if  Psi_cholesky is None or D_inv is None:
-            D_inv, Psi_cholesky = self.get_precision_components()
-        return 1.0 / self.get_precision_diagonal(D_inv=D_inv, Psi_cholesky=Psi_cholesky, idx=idx)
     
     def get_conditional_params(
         self, 
@@ -501,66 +484,92 @@ class LowRankPlusDiagonal(nn.Module):
         """
         Compute τ̃_j² and α_j sharing intermediate computations.
         
-        Let W = L_Ψ^{-1} V^T (computed once for all M).
+        Let W = L_Ψ^{-1} V^T.
         Then:
             Θ_jj = d_j^{-1} - d_j^{-2} ||W_j||²
             τ̃_j² = Θ_jj^{-1}
             α_j^T = τ̃_j² * d_j^{-1} * W_j^T W_{n(j)} * D_{n(j)}^{-1}
         
         Args:
-            knn_idx: (M, K_neighbors) neighbor indices
-            D_inv: Precomputed 1/D
-            Psi_cholesky: Precomputed L_Ψ where Ψ = L_Ψ L_Ψ^T
-            idx: Optional subset indices
-            
+            knn_idx: (M', K) neighbor indices into full M
+            D_inv: Precomputed 1/D, shape (..., M)
+            Psi_cholesky: Precomputed L_Ψ, shape (..., R, R)
+            idx: (M',) indices of minibatch points into full M
+                
         Returns:
             tau_tilde_sq: (..., M') conditional variances  
-            alpha: (..., M', K_neighbors) regression coefficients
+            alpha: (..., M', K) regression coefficients
         """
         if Psi_cholesky is None or D_inv is None:
             D_inv, Psi_cholesky = self.get_precision_components()
         
-        V = self.V.data  # (..., M, K)
-
-        if idx is not None:
-            # fix for unbatched later
-            V = V[:,idx]
-            D_inv = D_inv[:, idx]
+        V_full = self.V.data  # (L, M, R) or (M, R)
+        D_inv_full = D_inv    # (L, M) or (M,)
         
-        # Compute W = L_Ψ^{-1} V^T 
-        # Shape: (..., K, M)
-        W_T = torch.linalg.solve_triangular(
+        if idx is None:
+            # Full batch - idx is just all indices
+            M = V_full.shape[-2]
+            idx = torch.arange(M, device=V_full.device)
+        
+        M_prime = idx.shape[0]
+        K_neigh = knn_idx.shape[-1]
+        
+        # Combine idx and knn_idx into unique indices for a single solve
+        # idx: (M',)
+        # knn_idx: (M', K)
+        knn_flat = knn_idx.reshape(-1)  # (M' * K,)
+        
+        # Concatenate and find unique indices
+        all_indices = torch.cat([idx, knn_flat])  # (M' + M'*K,)
+        unique_indices, inverse_map = torch.unique(all_indices, return_inverse=True)
+        # inverse_map tells us where each element of all_indices maps in unique_indices
+        
+        # Split inverse_map back into idx part and knn part
+        idx_in_unique = inverse_map[:M_prime]  # (M',) - maps idx to unique
+        knn_in_unique = inverse_map[M_prime:].reshape(M_prime, K_neigh)  # (M', K) - maps knn_idx to unique
+        
+        # Gather V and D_inv for unique indices only
+        if self.batch_size is None:
+            V_unique = V_full[unique_indices]  # (U, R) where U = len(unique_indices)
+            D_inv_unique = D_inv_full[unique_indices]  # (U,)
+        else:
+            V_unique = V_full[:, unique_indices]  # (L, U, R)
+            D_inv_unique = D_inv_full[:, unique_indices]  # (L, U)
+        
+        # Single triangular solve for all unique indices
+        # W_unique = (L_Ψ^{-1} V_unique^T)^T, shape (..., U, R)
+        W_unique = torch.linalg.solve_triangular(
             Psi_cholesky,
-            V.transpose(-2, -1),
+            V_unique.transpose(-2, -1),  # (..., R, U)
             upper=False
-        )
-        W = W_T.transpose(-2, -1)
+        ).transpose(-2, -1)  # (..., U, R)
         
+        # Now extract W_j (for minibatch points) and W_neighbors using the inverse maps
+        if self.batch_size is None:
+            W_j = W_unique[idx_in_unique]  # (M', R)
+            D_inv_j = D_inv_unique[idx_in_unique]  # (M',)
+            W_neighbors = W_unique[knn_in_unique]  # (M', K, R)
+            D_inv_neighbors = D_inv_unique[knn_in_unique]  # (M', K)
+        else:
+            W_j = W_unique[:, idx_in_unique]  # (L, M', R)
+            D_inv_j = D_inv_unique[:, idx_in_unique]  # (L, M')
+            W_neighbors = W_unique[:, knn_in_unique]  # (L, M', K, R)
+            D_inv_neighbors = D_inv_unique[:, knn_in_unique]  # (L, M', K)
         
-        # τ̃_j²: need ||W_j||² for each j
-        W_sq_sum = (W ** 2).sum(dim=-1)  # (..., M)
-        Theta_diag = D_inv - (D_inv ** 2) * W_sq_sum
-        tau_tilde_sq = 1.0 / Theta_diag
+        # τ̃_j²: Θ_jj = d_j^{-1} - d_j^{-2} ||W_j||²
+        W_j_sq_sum = (W_j ** 2).sum(dim=-1)  # (..., M')
+        Theta_diag = D_inv_j - (D_inv_j ** 2) * W_j_sq_sum
+        tau_tilde_sq = 1.0 / Theta_diag  # (..., M')
         
-        # α_j: need W_j^T @ W_{n(j)} for each j
-       
-        W_neighbors = W[:, knn_idx]  # (L, M', K_neighbors, K)
-        D_inv_neighbors = D_inv[:, knn_idx]  # (L, M', K_neighbors)
-        
-        cross = torch.einsum('lkm,lkmn->lmn', W_j, W_neighbors)
+        # α_j^T = τ̃_j² * d_j^{-1} * W_j^T W_{n(j)} * D_{n(j)}^{-1}
+        # W_j: (..., M', R), W_neighbors: (..., M', K, R)
+
+        # W_j.unsqueeze(-2): (..., M', 1, R)
+        # W_neighbors.transpose(-2, -1): (..., M', R, K)
+        # Result: (..., M', 1, K) -> squeeze to (..., M', K)
+
+        cross = (W_j.unsqueeze(-2) @ W_neighbors.transpose(-2, -1)).squeeze(-2)  # (..., M', K)
         
         alpha = tau_tilde_sq.unsqueeze(-1) * D_inv_j.unsqueeze(-1) * cross * D_inv_neighbors
         
         return tau_tilde_sq, alpha
-    
-    def freeze(self):
-        self.diag.freeze()
-        self.V.freeze()
-    
-    def unfreeze(self):
-        self.diag.unfreeze()
-        self.V.unfreeze()
-    
-    def __repr__(self):
-        shape_str = f"{self.m}" if self.batch_size is None else f"({self.batch_size}, {self.m})"
-        return f"LowRankPlusDiagonal(size={shape_str}, rank={self.rank})"
