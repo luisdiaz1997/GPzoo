@@ -22,6 +22,8 @@ from .nsf import (
     VNNGP_NSF,
     MGGP_SVGP_NSF,
     MGGP_VNNGP_NSF,
+    LCGP_NSF,
+    MGGP_LCGP_NSF,
 )
 
 from .registry import (
@@ -37,6 +39,8 @@ __all__ = [
     "VNNGP_NSF",
     "MGGP_SVGP_NSF",
     "MGGP_VNNGP_NSF",
+    "LCGP_NSF",
+    "MGGP_LCGP_NSF",
     # Registry utilities
     "build_model",
     "load_checkpoint",

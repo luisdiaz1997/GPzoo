@@ -13,6 +13,11 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 BENCHMARK_DIR = ROOT / "models" / "mggp_slideseq_benchmarks"
 
+
+
+VNNGP_K = 50
+VNNGP_E_SAMPLES = 1
+
 SEED = 67
 STEPS = 2000
 X_BATCH = 7000
@@ -45,9 +50,14 @@ USE_SCHEDULER = False
 SVGP_MGGP_CHECKPOINT = OUTPUT_DIR / "slideseq_mggp_svgp.pth"
 VNNGP_MGGP_CHECKPOINT = OUTPUT_DIR / "slideseq_mggp_vnngp_k=50.pth"
 SVGP_CHECKPOINT = OUTPUT_DIR / "slideseq_svgp.pth"
-VNNGP_CHECKPOINT = OUTPUT_DIR / "slideseq_vnngp_k=50.pth"
+VNNGP_CHECKPOINT = OUTPUT_DIR / f"slideseq_vnngp_k={VNNGP_K}.pth"
 
-VNNGP_K = 50
-VNNGP_E_SAMPLES = 1
+# LCGP-specific configuration
+LCGP_K = VNNGP_K  # Use same K as VNNGP
+LCGP_RANK = VNNGP_K + 5  # Default rank
+LCGP_DIAG_MODE = "softplus"
+LCGP_CHECKPOINT = OUTPUT_DIR / f"slideseq_lcgp_k={VNNGP_K}.pth"
+LCGP_MGGP_CHECKPOINT = OUTPUT_DIR / f"slideseq_mggp_lcgp_k={VNNGP_K}.pth"
+
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

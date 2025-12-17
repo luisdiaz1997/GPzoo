@@ -663,6 +663,146 @@ def train_mggp_vnngp_with_tracking(
     return losses, means, scales, idxs
 
 
+def train_lcgp_batched_with_tracking(
+    optimizer,
+    model,
+    X: torch.Tensor,
+    y: torch.Tensor,
+    device: torch.device,
+    *,
+    steps: int = 200,
+    start_step: int = 0,
+    x_batch_size: int = 1000,
+    y_batch_size: int = 1000,
+    e_samples: int = 1,
+    lengthscale_unfreeze_step: Optional[int] = None,
+    lengthscale_param=None,
+    lengthscale_lr: Optional[float] = None,
+    scale_unfreeze_step: Optional[int] = None,
+    scale_params=None,
+    scale_lr: Optional[float] = None,
+    writer: Optional[SummaryWriter] = None,
+    progress_desc: str = "LCGP",
+    image_log_every: Optional[int] = None,
+    scheduler=None,
+) -> Tuple[List[float], List, List, List]:
+    """
+    Training loop for LCGP (Locally Conditioned GP) models.
+    
+    Similar to VNNGP training but adapted for LCGP's LowRankPlusDiagonal 
+    variational covariance parameterization.
+    """
+    losses, means, scales, idxs = [], [], [], []
+    N = len(X)
+    J = len(y)
+
+    kernel = getattr(model.prior, "kernel", None)
+    ls_param = lengthscale_param if lengthscale_param is not None else getattr(kernel, "lengthscale", None)
+    ls_added = ls_param is None or _is_param_in_optimizer(ls_param, optimizer)
+    base_lr = lengthscale_lr if lengthscale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
+
+    # Handle scale parameter unfreezing
+    scale_params_list = scale_params if scale_params is not None else []
+    scale_unfrozen = len(scale_params_list) == 0
+    scale_target_lr = scale_lr if scale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
+
+    # Precompute KNN indices for all points
+    full_knn_idx = model.prior.calculate_knn(X).clone()[:, :-1]
+
+    for it in trange(start_step, start_step + steps, desc=progress_desc):
+        if lengthscale_unfreeze_step is not None and not ls_added and it >= lengthscale_unfreeze_step:
+            ls_param.requires_grad = True
+            optimizer.add_param_group({"params": [ls_param], "lr": base_lr})
+            ls_added = True
+
+        if scale_unfreeze_step is not None and not scale_unfrozen and it >= scale_unfreeze_step:
+            for param in scale_params_list:
+                param.requires_grad = True
+            for group in optimizer.param_groups:
+                if scale_params_list and any(p is scale_params_list[0] for p in group['params']):
+                    group['lr'] = scale_target_lr
+                    break
+            scale_unfrozen = True
+
+        idx = torch.multinomial(torch.ones(N), num_samples=min(x_batch_size, N), replacement=False)
+        idy = torch.multinomial(torch.ones(J), num_samples=min(y_batch_size, J), replacement=False)
+
+        Xb = X[idx].to(device)
+        yb = y[idy][:, idx].to(device)
+        knn_idx = full_knn_idx[idx].to(device)
+        model.prior.knn_idx = knn_idx
+
+        optimizer.zero_grad()
+        pY, qF, qZ, _ = model.forward_batched_train(Xb.squeeze(), idx=idx, idy=idy, E=e_samples)
+
+        logpY = _get_log_likelihood(pY, yb)
+        L1 = logpY.mean(dim=0).sum()
+        L2 = torch.sum(model.prior.kl_divergence_full(qZ, idx=idx))
+        loss = -(L1 - L2)
+
+        loss.backward()
+        optimizer.step()
+        
+        if hasattr(model, 'project_parameters'):
+            model.project_parameters()
+        if scheduler is not None and scheduler.last_epoch < scheduler.total_steps:
+            scheduler.step()
+        losses.append(loss.item())
+
+        if writer is not None and it % 10 == 0:
+            writer.add_scalar("loss/train", loss.item(), it)
+            if ls_param is not None:
+                writer.add_scalar("kernel/lengthscale", ls_param.detach().mean().item(), it)
+            writer.add_histogram("qF/mean", qF.mean, it)
+            writer.add_histogram("qF/scale", qF.scale, it)
+            writer.add_scalar("qF/scale_min", qF.scale.min().item(), it)
+            writer.add_scalar("qF/scale_max", qF.scale.max().item(), it)
+            writer.add_scalar("qF/scale_mean", qF.scale.mean().item(), it)
+            
+            num_nan = torch.isnan(qF.scale).sum().item()
+            num_inf = torch.isinf(qF.scale).sum().item()
+            num_nonpositive = (qF.scale <= 0).sum().item()
+            writer.add_scalar("qF/scale_num_nan", num_nan, it)
+            writer.add_scalar("qF/scale_num_inf", num_inf, it)
+            writer.add_scalar("qF/scale_num_nonpositive", num_nonpositive, it)
+            
+            # Log LowRankPlusDiagonal components
+            if hasattr(model.prior, "Lu") and hasattr(model.prior.Lu, "D"):
+                D = model.prior.Lu.D
+                writer.add_histogram("Lu/diag", D, it)
+                writer.add_scalar("Lu/diag_mean", D.mean().item(), it)
+                writer.add_scalar("Lu/diag_min", D.min().item(), it)
+                
+                V = model.prior.Lu.V.data
+                writer.add_histogram("Lu/V_norm", (V ** 2).sum(dim=-1).sqrt(), it)
+            
+            if hasattr(model, 'W'):
+                W_raw = model.W.detach()
+                writer.add_histogram("W/raw", W_raw, it)
+                writer.add_scalar("W/mean", W_raw.mean().item(), it)
+                writer.add_scalar("W/min", W_raw.min().item(), it)
+                writer.add_scalar("W/max", W_raw.max().item(), it)
+                num_negative = (W_raw < 0).sum().item()
+                writer.add_scalar("W/num_negative", num_negative, it)
+
+        if it % 10 == 0:
+            idxs.append(idx.detach().cpu().numpy())
+            means.append(qF.mean.detach().cpu().numpy())
+            scales.append(qF.scale.detach().cpu().numpy())
+
+        if writer is not None and image_log_every is not None and it % image_log_every == 0:
+            _log_factor_images(writer, "factors/mean", qF.mean, Xb, it)
+            _log_factor_images(writer, "factors/scale", qF.scale, Xb, it, vmin=0, vmax=1)
+
+        del pY, qF, qZ, logpY, L1, L2, loss, Xb, yb, knn_idx
+        model.prior.knn_idx = None
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        gc.collect()
+
+    return losses, means, scales, idxs
+
+
 def freeze_svgp_kernel_and_inputs(model) -> None:
     """Freeze kernel hyperparameters and inducing inputs for SVGP-style models."""
 
@@ -798,3 +938,147 @@ def prepare_frozen_params(model):
         'other_params': other_params,
         'lengthscale_param': lengthscale_param
     }
+
+
+def train_mggp_lcgp_with_tracking(
+    optimizer,
+    model,
+    X: torch.Tensor,
+    groupsX: torch.Tensor,
+    y: torch.Tensor,
+    device: torch.device,
+    *,
+    steps: int = 200,
+    start_step: int = 0,
+    x_batch_size: int = 1000,
+    y_batch_size: int = 1000,
+    e_samples: int = 1,
+    lengthscale_unfreeze_step: Optional[int] = None,
+    lengthscale_param=None,
+    lengthscale_lr: Optional[float] = None,
+    scale_unfreeze_step: Optional[int] = None,
+    scale_params=None,
+    scale_lr: Optional[float] = None,
+    writer: Optional[SummaryWriter] = None,
+    progress_desc: str = "MGGP-LCGP",
+    image_log_every: Optional[int] = None,
+    scheduler=None,
+):
+    losses, means, scales, idxs = [], [], [], []
+    N = len(X)
+    J = len(y)
+
+    kernel = getattr(model.prior, "kernel", None)
+    ls_param = lengthscale_param if lengthscale_param is not None else getattr(kernel, "lengthscale", None)
+    ls_added = ls_param is None or _is_param_in_optimizer(ls_param, optimizer)
+    base_lr = lengthscale_lr if lengthscale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
+
+    # Handle scale parameter unfreezing
+    scale_params_list = scale_params if scale_params is not None else []
+    scale_unfrozen = len(scale_params_list) == 0  # True if no scale params to manage
+    scale_target_lr = scale_lr if scale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
+
+    full_knn_idx = model.prior.calculate_knn(X).clone()[:, :-1]
+
+    for it in trange(start_step, start_step + steps, desc=progress_desc):
+        if lengthscale_unfreeze_step is not None and not ls_added and it >= lengthscale_unfreeze_step:
+            ls_param.requires_grad = True
+            optimizer.add_param_group({"params": [ls_param], "lr": base_lr})
+            ls_added = True
+
+        if scale_unfreeze_step is not None and not scale_unfrozen and it >= scale_unfreeze_step:
+            # Unfreeze scale parameters and update their learning rate
+            for param in scale_params_list:
+                param.requires_grad = True
+            # Find the param group containing scale params and update its lr
+            for group in optimizer.param_groups:
+                if scale_params_list and any(p is scale_params_list[0] for p in group['params']):
+                    group['lr'] = scale_target_lr
+                    break
+            scale_unfrozen = True
+
+        idx = torch.multinomial(torch.ones(N), num_samples=min(x_batch_size, N), replacement=False)
+        idy = torch.multinomial(torch.ones(J), num_samples=min(y_batch_size, J), replacement=False)
+
+        Xb = X[idx].to(device)
+        yb = y[idy][:, idx].to(device)
+        gb = groupsX[idx].to(device)
+        knn_idx = full_knn_idx[idx].to(device)
+        model.prior.knn_idx = knn_idx
+
+        optimizer.zero_grad()
+        pY, qF, qZ, _ = model.forward_batched_train(
+            Xb.squeeze(), idx=idx, groupsX=gb, idy=idy, E=e_samples
+        )
+
+        logpY = _get_log_likelihood(pY, yb)
+        L1 = logpY.mean(dim=0).sum()
+        L2 = torch.sum(model.prior.kl_divergence_full(qZ, idx=idx))
+        loss = -(L1 - L2)
+
+        loss.backward()
+        optimizer.step()
+        # Apply parameter projection if using projected gradient mode
+        if hasattr(model, 'project_parameters'):
+            model.project_parameters()
+        if scheduler is not None and scheduler.last_epoch < scheduler.total_steps:
+            scheduler.step()
+        losses.append(loss.item())
+
+        if writer is not None and it % 10 == 0:
+            writer.add_scalar("loss/train", loss.item(), it)
+            if ls_param is not None:
+                writer.add_scalar("kernel/lengthscale", ls_param.detach().mean().item(), it)
+            if kernel is not None and hasattr(kernel, "group_diff_param"):
+                writer.add_scalar("kernel/group_diff_param", kernel.group_diff_param.detach().mean().item(), it)
+            writer.add_histogram("qF/mean", qF.mean, it)
+            writer.add_histogram("qF/scale", qF.scale, it)
+            # Log qF.scale statistics to debug constraint violations
+            writer.add_scalar("qF/scale_min", qF.scale.min().item(), it)
+            writer.add_scalar("qF/scale_max", qF.scale.max().item(), it)
+            writer.add_scalar("qF/scale_mean", qF.scale.mean().item(), it)
+            # Check for invalid values
+            num_nan = torch.isnan(qF.scale).sum().item()
+            num_inf = torch.isinf(qF.scale).sum().item()
+            num_nonpositive = (qF.scale <= 0).sum().item()
+            writer.add_scalar("qF/scale_num_nan", num_nan, it)
+            writer.add_scalar("qF/scale_num_inf", num_inf, it)
+            writer.add_scalar("qF/scale_num_nonpositive", num_nonpositive, it)
+            
+            # Log LowRankPlusDiagonal components (LCGP Specific)
+            if hasattr(model.prior, "Lu") and hasattr(model.prior.Lu, "D"):
+                D = model.prior.Lu.D
+                writer.add_histogram("Lu/diag", D, it)
+                writer.add_scalar("Lu/diag_mean", D.mean().item(), it)
+                writer.add_scalar("Lu/diag_min", D.min().item(), it)
+                
+                V = model.prior.Lu.V.data
+                writer.add_histogram("Lu/V_norm", (V ** 2).sum(dim=-1).sqrt(), it)
+
+            # Log W loadings (raw values before transformation)
+            if hasattr(model, 'W'):
+                W_raw = model.W.detach()
+                writer.add_histogram("W/raw", W_raw, it)
+                writer.add_scalar("W/mean", W_raw.mean().item(), it)
+                writer.add_scalar("W/min", W_raw.min().item(), it)
+                writer.add_scalar("W/max", W_raw.max().item(), it)
+                # Count negative values
+                num_negative = (W_raw < 0).sum().item()
+                writer.add_scalar("W/num_negative", num_negative, it)
+
+        if it % 10 == 0:
+            idxs.append(idx.detach().cpu().numpy())
+            means.append(qF.mean.detach().cpu().numpy())
+            scales.append(qF.scale.detach().cpu().numpy())
+
+        if writer is not None and image_log_every is not None and it % image_log_every == 0:
+            _log_factor_images(writer, "factors/mean", qF.mean, Xb, it)
+            _log_factor_images(writer, "factors/scale", qF.scale, Xb, it, vmin=0, vmax=1)
+
+        del pY, qF, qZ, logpY, L1, L2, loss, Xb, yb, gb, knn_idx
+        model.prior.knn_idx = None
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+        gc.collect()
+
+    return losses, means, scales, idxs

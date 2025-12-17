@@ -742,223 +742,148 @@ class VNNGP(SVGP):
 
         
 class LCGP(SVGP):
-    """Locally Conditioned Gaussian Process
+    """
+    Locally Conditioned GP using low-rank plus diagonal variational covariance.
     
-    Uses LowRankPlusDiagonal covariance parameterization S = D + VV^T
-    with efficient KL computation via Woodbury identity.
+    Uses the locally conditioned KL approximation:
+        KL(q(U) || p(U)) ≈ Σ_j E_{q(U_{n(j)})}[KL(q(U_j|U_{n(j)}) || p(U_j|U_{n(j)}))]
     
-    Args:
-        kernel: GP kernel function
-        dim: Input dimension
-        M: Number of inducing points
-        jitter: Jitter for numerical stability
-        K: Number of nearest neighbors for local conditioning
-        rank: Rank R of low-rank component V ∈ ℝ^{M × R}
-        diag_mode: 'softplus' or 'exp' for diagonal constraint
+    Variational covariance S = D + VV^T parameterized via LowRankPlusDiagonal,
+    giving O(MR) parameters instead of O(M²).
     """
     
-    def __init__(
-        self, 
-        kernel, 
-        dim=1, 
-        M=50, 
-        jitter=1e-4, 
-        K=3, 
-        rank=None,
-        diag_mode='softplus'
-    ):
-        # Call SVGP but we'll override Lu
-        super().__init__(kernel, dim, M, jitter, diagonal_only=False, cholesky_mode='exp')
-        self.K = K
-        self.knn_idx = None  # (N, K) neighbors for data points
-        self.knn_idz = None  # (M, K) neighbors for inducing points
-        self.inducing_points = True
+    def __init__(self, kernel, dim=1, M=50, jitter=1e-4, K=3, rank=None, diag_mode='softplus'):
+        super().__init__(kernel, dim, M, jitter, diagonal_only=True, cholesky_mode='exp')
         
-        # Override Lu with LowRankPlusDiagonal
-        # For L latent GPs, batch_size = L
+        self.K = K
+        self.knn_idx = None
+        self.knn_idz = None
+        
         del self.Lu
+        rank = rank if rank is not None else min(M, K + 5)
         self.Lu = LowRankPlusDiagonal(m=M, rank=rank, batch_size=None, diag_mode=diag_mode)
     
-    def apply_constraints(self):
-        """Lu constraints handled internally by LowRankPlusDiagonal."""
-        mu = self.mu
-        return mu, self.Lu
-    
     def calculate_knn(self, X):
-        """Calculate the K nearest neighbors of X in Z using FAISS."""
+        """Calculate the K+1 nearest neighbors of X in Z using FAISS."""
         X_np = X.detach().cpu().float().numpy()
         Z = self.Z.detach().cpu().float().numpy()
         index = faiss.IndexFlatL2(Z.shape[-1])
         index.add(Z)
         distances, indices = index.search(X_np, self.K + 1)
-        return torch.tensor(indices, dtype=torch.long, device='cpu')
+        return torch.tensor(indices, dtype=torch.long, device=X.device)
+    
+    def reshape_input_data(self, **kwargs):
+        """Same as VNNGP - reshape for local kernel computation."""
+        X = kwargs.get("X")
+        Z = kwargs.get("Z")
+        knn_idx = kwargs.get("knn_idx", self.knn_idx)
+
+        X, Z = super(SVGP, self).reshape_input_data(X=X, Z=Z)
+        X = X.unsqueeze(-2)  # (N, 1, D)
+        Z = Z[knn_idx]       # (N, K, D)
+        
+        return X, Z
     
     def forward_train(self, X, idx=None, diag=True, verbose=False, **kwargs):
-        """Fast forward pass using local parameterization directly."""
+        """Training forward - marginal q(U_j) = N(m_j, s_jj)."""
+        mu = self.mu
+        D = self.Lu.D
+        V = self.Lu.V.data
+        
         if idx is not None:
-            mean = self.mu[idx]
-            # S_jj = D_j + ||V_j||^2
-            cov = self.Lu.D[idx] + self.Lu.V.diag()[idx]
+            mu_batch = mu[idx]
+            s_diag = D[idx] + (V[idx] ** 2).sum(dim=-1)
         else:
-            mean = self.mu
-            cov = self.Lu.D + self.Lu.V.diag()
+            mu_batch = mu
+            s_diag = D + (V ** 2).sum(dim=-1)
         
-        cov = torch.clamp(cov, min=1e-3, max=100.0)
-        scale = cov ** 0.5
+        s_diag = torch.clamp(s_diag, min=1e-6, max=100.0)
+        qF = distributions.Normal(mu_batch, s_diag.sqrt())
         
-        qF = distributions.Normal(mean, scale)
         return qF, None, None
     
     def kl_divergence_full(self, qZ=None, pZ=None, verbose=False, idx=None, **kwargs):
         """
-        Compute locally conditioned KL divergence.
+        Locally conditioned KL divergence.
         
-        KL(q(U) || p(U)) ≈ Σ_j E_{q(U_{n(j)})}[KL(q(U_j|U_{n(j)}) || p(U_j|U_{n(j)}))]
-        
-        Using the simplified form:
-        = Σ_j 1/2 [log(τ_j²/τ̃_j²) + s_jj/τ_j² + (m_j - β_j^T m_{n(j)})²/τ_j² 
-                   + β_j^T S_{n(j)n(j)} β_j/τ_j² - 2α_j^T S_{n(j)n(j)} β_j/τ_j² - 1]
+        KL ≈ Σ_j (1/2) [ log(τ_j²) - log(τ̃_j²) + s_jj/τ_j² 
+                        + (m_j - β_j^T m_{n(j)})²/τ_j²
+                        + β_j^T S_{n(j)n(j)} β_j / τ_j²
+                        - 2 α_j^T S_{n(j)n(j)} β_j / τ_j²
+                        - 1 ]
         """
+        # Setup indices
         if idx is not None:
             Z = self.Z[idx]
             knn_idx = self.knn_idz[idx]
-            if hasattr(self, 'groupsZ'):
-                groupsZ = self.groupsZ[idx]
         else:
             Z = self.Z
             knn_idx = self.knn_idz
-            if hasattr(self, 'groupsZ'):
-                groupsZ = self.groupsZ
+            idx = torch.arange(Z.shape[0], device=Z.device)
         
-        # Get kernel covariances for prior
-        if hasattr(self, 'groupsZ'):
-            covariances = self.forward_kernels(X=Z, groupsX=groupsZ, diag=True, knn_idx=knn_idx)
-        else:
-            covariances = self.forward_kernels(X=Z, diag=True, knn_idx=knn_idx)
+        M_prime = idx.shape[0]
         
+        # ==================== Prior terms (kernel) ====================
+        covariances = self.forward_kernels(X=Z, diag=True, knn_idx=knn_idx)
         Kxx, Kzx, Kzz = covariances
         
-        # Add jitter and compute Cholesky for prior
-        Kzz = add_jitter(Kzz, self.jitter)
-        L_prior = torch.linalg.cholesky(Kzz)  # (M', K, K)
+        k_jj = Kxx.squeeze(-1)          # (M',)
+        K_nj = Kzx.squeeze(-1)          # (M', K)
+        Kzz = add_jitter(Kzz, self.jitter)  # (M', K, K)
         
-        # Prior: β_j = K_{jn(j)} K_{n(j)n(j)}^{-1}, τ_j² = k_jj - K_{jn(j)} K_{n(j)n(j)}^{-1} K_{n(j)j}
-        # W_prior = K_{jn(j)} L_prior^{-T} so β_j = W_prior @ L_prior^{-1}
-        # and τ_j² = k_jj - ||W_prior||²
-        Kzx_t = Kzx.transpose(-2, -1)  # (M', 1, K)
-        W_prior_t = torch.linalg.solve_triangular(L_prior, Kzx_t.transpose(-2, -1), upper=False)
-        W_prior = W_prior_t.transpose(-2, -1)  # (M', 1, K)
+        # Cholesky and solve for β
+        L_prior = torch.linalg.cholesky(Kzz)
+        beta_t = torch.linalg.solve_triangular(L_prior, K_nj.unsqueeze(-1), upper=False)
         
-        # τ_j² (prior conditional variance)
-        Kxx = Kxx.squeeze(-1) if Kxx.dim() > 1 else Kxx
-        tau_sq = Kxx - (W_prior ** 2).sum(dim=-1).squeeze(-1)  # (M',)
+        # τ_j² = k_jj - ||L^{-1} K_{n(j),j}||²
+        tau_sq = k_jj - (beta_t.squeeze(-1) ** 2).sum(dim=-1)
         tau_sq = torch.clamp(tau_sq, min=1e-6)
         
-        # Get variational parameters
-        mu = self.mu
-        if idx is not None:
-            mu_j = mu[idx]
-        else:
-            mu_j = mu
-        
-        # Get neighbors' mu
-        mu_neighbors = mu[knn_idx]  # (M', K)
-        
-        # β_j^T m_{n(j)} via whitened prior
-        # First whiten mu_neighbors
-        mu_neighbors_whitened = torch.linalg.solve_triangular(
-            L_prior, 
-            mu_neighbors.unsqueeze(-1),  # (M', K, 1)
-            upper=False
+        # β = L^{-T} L^{-1} K_{n(j),j}
+        beta = torch.linalg.solve_triangular(
+            L_prior.transpose(-2, -1), beta_t, upper=True
         ).squeeze(-1)  # (M', K)
         
-        # β_j^T m_{n(j)} = W_prior @ L_prior^{-1} @ m_{n(j)} = W_prior @ mu_neighbors_whitened
-        beta_m = (W_prior.squeeze(-2) * mu_neighbors_whitened).sum(dim=-1)  # (M',)
+        # ==================== Variational terms ====================
+        mu = self.mu
+        D = self.Lu.D
+        V = self.Lu.V.data
         
-        # Mean difference: (m_j - β_j^T m_{n(j)})²
-        mean_diff_sq = (mu_j - beta_m) ** 2  # (M',)
-        
-        # Get variational covariance quantities from LowRankPlusDiagonal
-        D_inv, Psi_cholesky = self.Lu.get_precision_components()
+        # τ̃_j² and α from LowRankPlusDiagonal (handles unique indices internally)
+        D_inv, Psi_chol = self.Lu.get_precision_components()
         tau_tilde_sq, alpha = self.Lu.get_conditional_params(
-            knn_idx=knn_idx, 
-            D_inv=D_inv, 
-            Psi_cholesky=Psi_cholesky,
-            idx=idx
-        )  # tau_tilde_sq: (M',), alpha: (M', K)
+            knn_idx=knn_idx, D_inv=D_inv, Psi_cholesky=Psi_chol, idx=idx
+        )
         
         # s_jj = D_j + ||V_j||²
-        if idx is not None:
-            s_jj = self.Lu.D[idx] + (self.Lu.V.data[idx] ** 2).sum(dim=-1)
-        else:
-            s_jj = self.Lu.D + (self.Lu.V.data ** 2).sum(dim=-1)
+        s_jj = D[idx] + (V[idx] ** 2).sum(dim=-1)
         
-        # S_{n(j)n(j)} block for each j
-        S_neighbors = self.Lu.get_block(knn_idx)  # (M', K, K)
+        # Mean terms
+        mu_j = mu[idx]
+        mu_neighbors = mu[knn_idx]
+        mean_diff = mu_j - (beta * mu_neighbors).sum(dim=-1)
         
-        # β_j^T S_{n(j)n(j)} β_j
-        # β_j = W_prior @ L_prior^{-1}, so in whitened space β_whitened = W_prior.squeeze(-2)
-        # β^T S β = β_whitened^T (L_prior^{-1} S L_prior^{-T}) β_whitened
-        # But we need to be careful - let's compute directly
+        # S_{n(j),n(j)} block
+        S_nn = self.Lu.get_block(knn_idx)  # (M', K, K)
         
-        # Whiten S_neighbors: L_prior^{-1} S_{n(j)n(j)} L_prior^{-T}
-        S_whitened = torch.linalg.solve_triangular(L_prior, S_neighbors, upper=False)
-        S_whitened = torch.linalg.solve_triangular(
-            L_prior, 
-            S_whitened.transpose(-2, -1), 
-            upper=False
-        ).transpose(-2, -1)  # (M', K, K)
+        # Quadratic forms: β^T S β and α^T S β
+        beta_S_beta = (beta.unsqueeze(-2) @ S_nn @ beta.unsqueeze(-1)).squeeze(-1).squeeze(-1)
+        alpha_S_beta = (alpha.unsqueeze(-2) @ S_nn @ beta.unsqueeze(-1)).squeeze(-1).squeeze(-1)
         
-        # β_j in whitened space is just W_prior.squeeze(-2)
-        beta_whitened = W_prior.squeeze(-2)  # (M', K)
-        
-        # β^T S β
-        beta_S_beta = (beta_whitened.unsqueeze(-2) @ S_whitened @ beta_whitened.unsqueeze(-1)).squeeze(-1).squeeze(-1)
-        
-        # α_j^T S_{n(j)n(j)} β_j
-        # α is already in original space, need to compute α^T S β
-        # α^T S_{n(j)n(j)} β = α^T S_{n(j)n(j)} K_{n(j)n(j)}^{-1} K_{n(j)j}
-        # In whitened space: α^T L_{n(j)} L_{n(j)}^T L^{-1} L^{-T} K_{n(j)j}
-        #                  = α^T L_{n(j)} @ (L^{-1} K_{n(j)j})  -- but K_{n(j)j} = Kzx
-        
-        # Simpler: α^T S β where S = S_neighbors, β comes from prior
-        # First compute S @ β (in original space)
-        # β = K_{jn(j)} K_{n(j)n(j)}^{-1} = (L^{-1} K_{n(j)j})^T @ L^{-1}
-        # Actually let's just compute it directly
-        
-        # K_{n(j)n(j)}^{-1} K_{n(j)j} = L^{-T} L^{-1} Kzx^T
-        Kzx_vec = Kzx.squeeze(-2)  # (M', K)
-        beta_orig = torch.cholesky_solve(Kzx_vec.unsqueeze(-1), L_prior).squeeze(-1)  # (M', K)
-        
-        # S @ β
-        S_beta = (S_neighbors @ beta_orig.unsqueeze(-1)).squeeze(-1)  # (M', K)
-        
-        # α^T S β
-        alpha_S_beta = (alpha * S_beta).sum(dim=-1)  # (M',)
-        
-        # KL formula (simplified form from derivation):
-        # KL = 1/2 [log(τ²/τ̃²) + s_jj/τ² + (m_j - β^T m)²/τ² + β^T S β/τ² - 2 α^T S β/τ² - 1]
-        
+        # ==================== KL ====================
         KL = 0.5 * (
             torch.log(tau_sq) - torch.log(tau_tilde_sq)
             + s_jj / tau_sq
-            + mean_diff_sq / tau_sq
+            + (mean_diff ** 2) / tau_sq
             + beta_S_beta / tau_sq
             - 2 * alpha_S_beta / tau_sq
             - 1
         )
         
-        if verbose:
-            print(f'tau_sq: {tau_sq.min():.4f} to {tau_sq.max():.4f}')
-            print(f'tau_tilde_sq: {tau_tilde_sq.min():.4f} to {tau_tilde_sq.max():.4f}')
-            print(f's_jj: {s_jj.min():.4f} to {s_jj.max():.4f}')
-            print(f'mean_diff_sq: {mean_diff_sq.min():.4f} to {mean_diff_sq.max():.4f}')
-            print(f'beta_S_beta: {beta_S_beta.min():.4f} to {beta_S_beta.max():.4f}')
-            print(f'alpha_S_beta: {alpha_S_beta.min():.4f} to {alpha_S_beta.max():.4f}')
-            print(f'KL per point: {KL.min():.4f} to {KL.max():.4f}')
-        
-        return torch.sum(KL)
-  
+        return KL.sum()
+
+
+
      
 class MGGP:
     def __init__(self, n_groups, M):
@@ -1023,3 +948,4 @@ def MGGPWrapper(BaseGPClass):
 MGGP_WSVGP = MGGPWrapper(WSVGP)
 MGGP_SVGP = MGGPWrapper(SVGP)
 MGGP_VNNGP = MGGPWrapper(VNNGP)
+MGGP_LCGP = MGGPWrapper(LCGP)

@@ -160,7 +160,7 @@ cython_debug/
 #.idea/
 
 # Large generated directories (models, figures, saved models)
-models/
+/models/
 saved_models/
 figures/
 jobs/

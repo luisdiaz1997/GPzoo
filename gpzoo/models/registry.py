@@ -30,6 +30,8 @@ _MODEL_REGISTRY: Dict[str, str] = {
     "tenxvisium/vnngp_mggp_nsf": "gpzoo.datasets.tenxvisium.vnngp_mggp_nsf:create_model",
     "liver/vnngp_nsf": "gpzoo.datasets.liver.vnngp_nsf:create_model",
     "liver/vnngp_mggp_nsf": "gpzoo.datasets.liver.vnngp_mggp_nsf:create_model",
+    "slideseq/lcgp_nsf": "gpzoo.datasets.slideseq.lcgp_nsf:create_model",
+    "slideseq/lcgp_mggp_nsf": "gpzoo.datasets.slideseq.lcgp_mggp_nsf:create_model",
 }
 
 
