@@ -438,17 +438,17 @@ class LowRankPlusDiagonal(nn.Module):
             return (self.m, self.m)
         return (self.batch_size, self.m, self.m)
     
-    def get_block(self, indices: torch.Tensor) -> torch.Tensor:
+    def get_block(self, knn_idx: torch.Tensor) -> torch.Tensor:
         """Extract S[indices, indices]."""
         D = self.D
         V = self.V.data
         
         if self.batch_size is None:
-            D_block = D[indices]
-            V_block = V[indices]
+            D_block = D[knn_idx]  # N x K
+            V_block = V[knn_idx]  # N x K x R
         else:
-            D_block = D[:, indices]
-            V_block = V[:, indices]
+            D_block = D[:, knn_idx]  # L x N x K
+            V_block = V[:, knn_idx]  # L x N x K x R
         
         return torch.diag_embed(D_block) + V_block @ V_block.transpose(-2, -1)
     
