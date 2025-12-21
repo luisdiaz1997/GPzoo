@@ -837,27 +837,7 @@ class LCGP(SVGP):
     
     def kl_divergence_full(self, qZ=None, pZ=None, verbose=False, idx=None, **kwargs):
         """
-        Locally conditioned KL divergence.
-        
-        KL ≈ Σ_j (1/2) [ log(τ_j²) - log(τ̃_j²) + s_jj/τ_j² 
-                        + (m_j - β_j^T m_{n(j)})²/τ_j²
-                        + β_j^T S_{n(j)n(j)} β_j / τ_j²
-                        - 2 α_j^T S_{n(j)n(j)} β_j / τ_j²
-                        - 1 ]
-        
-        Shape handling:
-        - Kernel terms (tau_sq, beta): (M',) or (M', K) - no L dimension
-        - Variational terms (tau_tilde_sq, alpha, s_jj, etc.): (L, M') or (L, M', K)
-        - We broadcast kernel terms to (1, M') to match variational terms
-        
-        Args:
-            qZ, pZ: Not used (kept for API compatibility)
-            verbose: Print debug info
-            idx: Indices of points in minibatch (into M dimension)
-            **kwargs: Additional arguments
-        
-        Returns:
-            Total KL divergence (scalar)
+        Locally conditioned KL divergence (unsimplified form).
         """
         # Setup indices
         if idx is not None:
@@ -869,156 +849,72 @@ class LCGP(SVGP):
             knn_idx = self.knn_idz
             idx_tensor = torch.arange(Z.shape[0], device=Z.device)
         
-        M_prime = idx_tensor.shape[0]
-        
-        # ==================== Prior terms (kernel) ====================
-        # These do NOT have the L (factor) dimension
-        # Check if this is MGGP (has groupsZ attribute)
+        # Prior terms (kernel) - no L dimension
         if hasattr(self, 'groupsZ'):
-            groupsZ = self.groupsZ
-            if idx is not None:
-                groupsZ_batch = groupsZ[idx]
-            else:
-                groupsZ_batch = groupsZ
+            groupsZ_batch = self.groupsZ[idx] if idx is not None else self.groupsZ
             covariances = self.forward_kernels(X=Z, groupsX=groupsZ_batch, diag=True, knn_idx=knn_idx)
         else:
             covariances = self.forward_kernels(X=Z, diag=True, knn_idx=knn_idx)
         
         Kxx, Kzx, Kzz = covariances
         
-        k_jj = Kxx.squeeze(-1)          # (M',)
-        K_nj = Kzx.squeeze(-1)          # (M', K)
-        Kzz = add_jitter(Kzz, self.jitter)  # (M', K, K)
-        
-        if verbose:
-            print(f"k_jj shape: {k_jj.shape}")
-            print(f"K_nj shape: {K_nj.shape}")
-            print(f"Kzz shape: {Kzz.shape}")
+        # Kxx comes out as (M', 1) from reshape_input_data's X.unsqueeze(-2)
+        # Kzx comes out as (M', K, 1) - need to squeeze
+        # Kzz is (M', K, K)
+        k_jj = Kxx.squeeze(-1).squeeze(-1)  # (M', 1) -> (M',)
+        K_nj = Kzx.squeeze(-1)               # (M', K, 1) -> (M', K)
+        Kzz = add_jitter(Kzz, self.jitter)   # (M', K, K)
         
         # Cholesky and solve for β
-        L_prior = torch.linalg.cholesky(Kzz)  # (M', K, K)
-        beta_t = torch.linalg.solve_triangular(L_prior, K_nj.unsqueeze(-1), upper=False)  # (M', K, 1)
+        L_prior = torch.linalg.cholesky(Kzz)
+        beta_t = torch.linalg.solve_triangular(L_prior, K_nj.unsqueeze(-1), upper=False)
         
-        # τ_j² = k_jj - ||L^{-1} K_{n(j),j}||²
-        # Shape: (M',)
-        tau_sq = k_jj - (beta_t.squeeze(-1) ** 2).sum(dim=-1)
-        tau_sq = torch.clamp(tau_sq, min=1e-6)
+        # τ_j² and β
+        tau_sq = torch.clamp(k_jj - (beta_t.squeeze(-1) ** 2).sum(dim=-1), min=1e-6)  # (M',)
+        beta = torch.linalg.solve_triangular(L_prior.transpose(-2, -1), beta_t, upper=True).squeeze(-1)  # (M', K)
         
-        # β = L^{-T} L^{-1} K_{n(j),j} = K_zz^{-1} K_{n(j),j}
-        # Shape: (M', K)
-        beta = torch.linalg.solve_triangular(
-            L_prior.transpose(-2, -1), beta_t, upper=True
-        ).squeeze(-1)
-        
-        if verbose:
-            print(f"tau_sq shape: {tau_sq.shape}")
-            print(f"beta shape: {beta.shape}")
-        
-        # ==================== Variational terms ====================
-        # These HAVE the L (factor) dimension
-        mu = self.mu  # (L, M)
-        D = self.Lu.D  # (L, M)
-        V = self.Lu.V.data  # (L, M, R)
-        
-        # Determine if we're in batched mode
+        # Variational terms - has L dimension
+        mu = self.mu
         is_batched = mu.dim() == 2
         
-        if verbose:
-            print(f"mu shape: {mu.shape}")
-            print(f"D shape: {D.shape}")
-            print(f"V shape: {V.shape}")
-            print(f"is_batched: {is_batched}")
-        
-        # Get precision components and conditional params from LowRankPlusDiagonal
+        # Get τ̃_j² and α_j
         D_inv, Psi_chol = self.Lu.get_precision_components()
         tau_tilde_sq, alpha = self.Lu.get_conditional_params(
             knn_idx=knn_idx, D_inv=D_inv, Psi_cholesky=Psi_chol, idx=idx_tensor
         )
-        # tau_tilde_sq: (L, M') or (M',)
-        # alpha: (L, M', K) or (M', K)
         
-        if verbose:
-            print(f"tau_tilde_sq shape: {tau_tilde_sq.shape}")
-            print(f"alpha shape: {alpha.shape}")
+        # Get S_{n(j)n(j)} and means
+        S_nn = self.Lu.get_block(knn_idx)
         
-        # Get variational parameters for the minibatch
         if is_batched:
-            # Batched: (L, M) -> (L, M')
-            D_j = D[:, idx_tensor]
-            V_j = V[:, idx_tensor]  # (L, M', R)
-            mu_j = mu[:, idx_tensor]  # (L, M')
-            mu_neighbors = mu[:, knn_idx]  # (L, M', K)
-            
-            # s_jj = D_j + ||V_j||^2, shape: (L, M')
-            s_jj = D_j + (V_j ** 2).sum(dim=-1)
-            
-            # S_{n(j),n(j)} block, shape: (L, M', K, K)
-            S_nn = self.Lu.get_block(knn_idx)
-            
-            # Broadcast kernel terms to match variational terms
-            # tau_sq: (M',) -> (1, M') for broadcasting with (L, M')
-            tau_sq = tau_sq.unsqueeze(0)
-            # beta: (M', K) -> (1, M', K) for broadcasting with (L, M', K)
-            beta = beta.unsqueeze(0)
-            
-            if verbose:
-                print(f"After broadcast - tau_sq shape: {tau_sq.shape}")
-                print(f"After broadcast - beta shape: {beta.shape}")
-                print(f"S_nn shape: {S_nn.shape}")
-            
-            # Mean difference: m_j - β^T m_{n(j)}
-            # mu_j: (L, M'), beta: (1, M', K), mu_neighbors: (L, M', K)
-            # (beta * mu_neighbors).sum(dim=-1): (L, M')
-            mean_diff = mu_j - (beta * mu_neighbors).sum(dim=-1)  # (L, M')
-            
-            # Quadratic forms
-            # beta: (1, M', K) -> (1, M', 1, K) for matmul
-            # S_nn: (L, M', K, K)
-            # Result: (L, M', 1, 1) -> (L, M')
-            beta_expanded = beta.unsqueeze(-2)  # (1, M', 1, K)
-            beta_S_beta = (beta_expanded @ S_nn @ beta_expanded.transpose(-2, -1)).squeeze(-1).squeeze(-1)
-            
-            # alpha: (L, M', K) -> (L, M', 1, K)
-            alpha_expanded = alpha.unsqueeze(-2)
-            alpha_S_beta = (alpha_expanded @ S_nn @ beta_expanded.transpose(-2, -1)).squeeze(-1).squeeze(-1)
-            
+            mu_j = mu[:, idx_tensor]
+            mu_neighbors = mu[:, knn_idx]
+            tau_sq = tau_sq.unsqueeze(0)  # (M',) -> (1, M')
+            beta = beta.unsqueeze(0)       # (M', K) -> (1, M', K)
         else:
-            # Unbatched case
-            D_j = D[idx_tensor]
-            V_j = V[idx_tensor]
             mu_j = mu[idx_tensor]
             mu_neighbors = mu[knn_idx]
-            
-            s_jj = D_j + (V_j ** 2).sum(dim=-1)
-            S_nn = self.Lu.get_block(knn_idx)
-            
-            mean_diff = mu_j - (beta * mu_neighbors).sum(dim=-1)
-            
-            beta_expanded = beta.unsqueeze(-2)
-            beta_S_beta = (beta_expanded @ S_nn @ beta_expanded.transpose(-2, -1)).squeeze(-1).squeeze(-1)
-            
-            alpha_expanded = alpha.unsqueeze(-2)
-            alpha_S_beta = (alpha_expanded @ S_nn @ beta_expanded.transpose(-2, -1)).squeeze(-1).squeeze(-1)
         
-        if verbose:
-            print(f"mean_diff shape: {mean_diff.shape}")
-            print(f"s_jj shape: {s_jj.shape}")
-            print(f"beta_S_beta shape: {beta_S_beta.shape}")
-            print(f"alpha_S_beta shape: {alpha_S_beta.shape}")
+        # Mean difference
+        mean_diff = mu_j - (beta * mu_neighbors).sum(dim=-1)
         
-        # ==================== KL ====================
-        # All terms should now be (L, M') or broadcast to it
+        # Quadratic forms
+        beta_exp = beta.unsqueeze(-2)
+        alpha_exp = alpha.unsqueeze(-2)
+        
+        beta_S_beta = (beta_exp @ S_nn @ beta_exp.transpose(-2, -1)).squeeze(-1).squeeze(-1)
+        alpha_S_alpha = (alpha_exp @ S_nn @ alpha_exp.transpose(-2, -1)).squeeze(-1).squeeze(-1)
+        alpha_S_beta = (alpha_exp @ S_nn @ beta_exp.transpose(-2, -1)).squeeze(-1).squeeze(-1)
+        
+        # KL (unsimplified form)
         KL = 0.5 * (
-            torch.log(tau_sq) - torch.log(tau_tilde_sq)
-            + s_jj / tau_sq
+            torch.log(tau_sq) - torch.log(tau_tilde_sq) - 1
+            + tau_tilde_sq / tau_sq
+            + alpha_S_alpha / tau_sq
             + (mean_diff ** 2) / tau_sq
             + beta_S_beta / tau_sq
             - 2 * alpha_S_beta / tau_sq
-            - 1
         )
-        
-        if verbose:
-            print(f"KL shape: {KL.shape}")
         
         return KL.sum()
 
