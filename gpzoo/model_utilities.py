@@ -10,6 +10,8 @@ import numpy as np
 
 from typing import Optional
 from sklearn.cluster import KMeans
+from sklearn.neighbors import KNeighborsClassifier
+import warnings
 
 
 
@@ -196,7 +198,12 @@ def mggp_kmeans_inducing_points(
         target_points: Total number of inducing points to select
         seed: Random seed for KMeans
         n_init: Number of KMeans initializations
-        allocation: "proportional" or "equal" allocation across groups
+        allocation: Allocation strategy across groups:
+            - "proportional": Allocate points proportionally to group sizes (default)
+            - "equal": Allocate equal points to each group
+            - "derived": Run K-means on all data for optimal spatial coverage,
+              then use KNN (k=5, distance-weighted) to classify centroids to groups.
+              Falls back to proportional for groups with no assigned points.
 
     Returns:
         Z: Inducing point coordinates
@@ -218,9 +225,101 @@ def mggp_kmeans_inducing_points(
 
     total_points = min(total_points, total_available)
 
-    if allocation not in {"proportional", "equal"}:
-        raise ValueError("allocation must be 'proportional' or 'equal'.")
+    if allocation not in {"proportional", "equal", "derived"}:
+        raise ValueError("allocation must be 'proportional', 'equal', or 'derived'.")
 
+    # ========== 'derived' mode: K-means on all data + KNN classification ==========
+    if allocation == "derived":
+        # Step 1: Run K-means on ALL data (ignoring groups) for optimal spatial coverage
+        kmeans = KMeans(n_clusters=total_points, random_state=seed, n_init=n_init)
+        kmeans.fit(X_np)
+        Z_derived = kmeans.cluster_centers_  # (M, 2) - optimal spatial coverage
+
+        # Step 2: Train KNN classifier to predict group from coordinates
+        knn = KNeighborsClassifier(n_neighbors=5, weights='distance')
+        knn.fit(X_np, groups_np)
+
+        # Step 3: Predict groups for centroids
+        groupsZ_derived = knn.predict(Z_derived)  # (M,)
+
+        # Step 4: Validation - ensure each group has at least some inducing points
+        derived_groups = np.unique(groupsZ_derived)
+        missing_groups = set(unique_groups) - set(derived_groups)
+
+        if missing_groups:
+            # Fall back to proportional allocation for missing groups
+            warnings.warn(
+                f"allocation='derived' failed to assign inducing points to groups "
+                f"{sorted(missing_groups)}. Falling back to 'proportional' allocation "
+                f"for these groups.",
+                UserWarning
+            )
+
+            # Calculate how many points needed for missing groups (proportional)
+            missing_counts = group_counts[np.isin(unique_groups, list(missing_groups))]
+            missing_total = missing_counts.sum()
+            n_missing = len(missing_groups)
+            n_needed = min(
+                int(missing_total / total_available * total_points),
+                total_points // n_missing
+            )
+            n_needed = max(n_needed, 1)  # At least 1 per missing group
+
+            # Generate K-means for missing groups
+            fallback_centers_list = []
+            fallback_group_list = []
+            for g in missing_groups:
+                g_idx = np.where(unique_groups == g)[0][0]
+                mask = groups_np == g
+                count = mask.sum()
+                n_clusters = min(n_needed, count)
+
+                if n_clusters > 0:
+                    kmeans_fb = KMeans(n_clusters=n_clusters, random_state=seed, n_init=n_init)
+                    kmeans_fb.fit(X_np[mask])
+                    fallback_centers_list.append(kmeans_fb.cluster_centers_)
+                    fallback_group_list.append(np.full(n_clusters, g, dtype=np.int64))
+
+            # Remove some derived points to make room for fallback points
+            n_replace = sum(len(g) for g in fallback_group_list)
+            if n_replace > 0:
+                # Remove points from groups that have excess (more than proportional share)
+                derived_group_counts = np.bincount(groupsZ_derived, minlength=len(unique_groups))
+                target_per_group = (total_points - n_replace) * group_counts / total_available
+                excess_mask = derived_group_counts > target_per_group
+
+                remove_indices = []
+                for g_idx in np.where(excess_mask)[0]:
+                    g = unique_groups[g_idx]
+                    n_remove = int(derived_group_counts[g_idx] - target_per_group[g_idx])
+                    if n_remove > 0:
+                        g_indices = np.where(groupsZ_derived == g)[0]
+                        remove_indices.extend(g_indices[:n_remove])
+
+                # Remove excess derived points
+                if remove_indices:
+                    keep_mask = np.ones(len(Z_derived), dtype=bool)
+                    keep_mask[remove_indices] = False
+                    Z_derived = Z_derived[keep_mask]
+                    groupsZ_derived = groupsZ_derived[keep_mask]
+
+                # Concatenate fallback points
+                if fallback_centers_list:
+                    Z_derived = np.concatenate([
+                        Z_derived,
+                        np.concatenate(fallback_centers_list, axis=0)
+                    ], axis=0)
+                    groupsZ_derived = np.concatenate([
+                        groupsZ_derived,
+                        np.concatenate(fallback_group_list, axis=0)
+                    ], axis=0)
+
+        return (
+            torch.tensor(Z_derived, dtype=X.dtype, device=X.device),
+            torch.tensor(groupsZ_derived, dtype=groupsX.dtype, device=groupsX.device)
+        )
+
+    # ========== 'proportional' and 'equal' modes ==========
     if allocation == "proportional":
         desired = group_counts / total_available * total_points
     else:  # equal
