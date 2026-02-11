@@ -181,6 +181,41 @@ def _log_diagonals(Lu: torch.Tensor) -> torch.Tensor:
     return lower + torch.diag_embed(log_diag)
 
 
+def kmeans_inducing_points(
+    X: torch.Tensor,
+    target_points: int,
+    *,
+    seed: int = 123,
+    n_init: int = 10,
+):
+    """Select inducing points using KMeans clustering (no groups).
+
+    Args:
+        X: Spatial coordinates, shape (N, D)
+        target_points: Number of inducing points to select
+        seed: Random seed for KMeans
+        n_init: Number of KMeans initializations
+
+    Returns:
+        Z: Inducing point coordinates, shape (M, D)
+    """
+    if target_points <= 0:
+        raise ValueError("target_points must be positive.")
+
+    X_np = X.detach().cpu().numpy()
+    N = len(X_np)
+    M = min(target_points, N)
+
+    if M == 0:
+        raise ValueError("No points available for initializing inducing locations.")
+
+    kmeans = KMeans(n_clusters=M, random_state=seed, n_init=n_init)
+    kmeans.fit(X_np)
+
+    Z = torch.tensor(kmeans.cluster_centers_, dtype=X.dtype, device=X.device)
+    return Z
+
+
 def mggp_kmeans_inducing_points(
     X: torch.Tensor,
     groupsX: torch.Tensor,
