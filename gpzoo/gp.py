@@ -787,7 +787,39 @@ class LCGP(SVGP):
         Z = Z[knn_idx]       # (N, K, D)
         
         return X, Z
-    
+
+    def apply_constraints(self):
+        # LCGP: Lu is LowRankPlusDiagonal, not a simple tensor.
+        # Return None for Lu — reshape_parameters builds local Cholesky from get_block().
+        return self.mu, None
+
+    def reshape_parameters(self, mu, Lu, covariances, verbose=False, knn_idx=None):
+        if knn_idx is None:
+            knn_idx = self.knn_idx
+
+        Kxx, Kzx, Kzz = covariances
+        Kzz = add_jitter(Kzz, self.jitter)
+
+        # Slice mu by KNN (same as VNNGP)
+        mu_shape = mu.shape
+        mu_reshaped = mu.reshape(-1, mu_shape[-1])
+        mu_knn = mu_reshaped[..., knn_idx]
+        mu = mu_knn.reshape(*mu_shape[:-1], knn_idx.shape[0], self.K)
+
+        # Get local K×K covariance blocks from LowRankPlusDiagonal
+        # S_block[n] = diag(D[knn[n]]) + V[knn[n]] @ V[knn[n]].T
+        Su_knn = self.Lu.get_block(knn_idx)  # (L, N, K, K) or (N, K, K)
+        Su_knn = add_jitter(Su_knn, self.jitter)
+        Lu = torch.linalg.cholesky(Su_knn)   # Local Cholesky factors
+
+        Kxx = Kxx.squeeze(-1)
+        return mu, Lu, Kxx, Kzx, Kzz
+
+    def forward(self, X, diag=True, verbose=False, **kwargs):
+        qF, qZ, pZ = super(SVGP, self).forward(X, diag=diag, verbose=verbose, **kwargs)
+        qF = distributions.Normal(qF.mean.squeeze(-1), qF.scale.squeeze(-1))
+        return qF, qZ, pZ
+
     def forward_train(self, X, idx=None, diag=True, verbose=False, **kwargs):
         """Training forward - marginal q(U_j) = N(m_j, s_jj).
         
