@@ -399,6 +399,7 @@ class LowRankPlusDiagonal(nn.Module):
         rank: Rank R of low-rank component
         batch_size: Optional batch dimension L
         diag_mode: 'softplus' or 'exp' for diagonal
+        isotropic: If True, D = d*I (single scalar). Default True.
     """
     
     def __init__(
@@ -406,15 +407,20 @@ class LowRankPlusDiagonal(nn.Module):
         m: int,
         rank: int = None,
         batch_size: int = None,
-        diag_mode: str = 'softplus'
+        diag_mode: str = 'softplus',
+        isotropic: bool = True
     ):
         super().__init__()
         self.m = m
         self.rank = rank if rank is not None else min(m, 10)
         self.batch_size = batch_size
+        self.isotropic = isotropic
         
         # Component parameters
-        diag_shape = (m,) if batch_size is None else (batch_size, m)
+        if isotropic:
+            diag_shape = (1,) if batch_size is None else (batch_size, 1)
+        else:
+            diag_shape = (m,) if batch_size is None else (batch_size, m)
         V_shape = (m, self.rank) if batch_size is None else (batch_size, m, self.rank)
         
         self.diag = PositiveParameter(diag_shape, mode=diag_mode)
@@ -423,14 +429,17 @@ class LowRankPlusDiagonal(nn.Module):
     @property
     def data(self) -> torch.Tensor:
         """Compute S = D + VV^T."""
-        D = self.diag.data
+        D = self.D
         V = self.V.data
         return torch.diag_embed(D) + V @ V.transpose(-2, -1)
     
     @property
     def D(self) -> torch.Tensor:
-        """Diagonal component."""
-        return self.diag.data
+        """Diagonal component (expanded to full length M)."""
+        d = self.diag.data
+        if self.isotropic:
+            return d.expand(*d.shape[:-1], self.m)
+        return d
     
     @property
     def shape(self) -> Tuple[int, ...]:
