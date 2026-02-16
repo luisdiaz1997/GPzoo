@@ -573,3 +573,127 @@ class LowRankPlusDiagonal(nn.Module):
         alpha = tau_tilde_sq.unsqueeze(-1) * D_inv_j.unsqueeze(-1) * cross * D_inv_neighbors
         
         return tau_tilde_sq, alpha
+
+    def get_conditional_params_exact(
+        self,
+        knn_idx: torch.Tensor,
+        idx: torch.Tensor = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute exact τ̃_j² and α_j via per-neighborhood Woodbury.
+
+        For S = D + VV^T, the exact conditional quantities are:
+            A_{n(j)} = V_{n(j)}^T D_{n(j)}^{-1} V_{n(j)}   (K x K)
+            Ψ_{n(j)} = I_K + A_{n(j)}                        (K x K)
+
+            τ̃_j² = d_j + V_j (I_K - A_{n(j)} Ψ_{n(j)}^{-1}) V_j^T
+            α_j^T = V_j V_{n(j)}^T S_{n(j)n(j)}^{-1}
+                   = V_j [Ṽ_{n(j)}^T - V_{n(j)}^T D_{n(j)}^{-1} V_{n(j)} Ψ_{n(j)}^{-1} Ṽ_{n(j)}^T]^T
+
+        where Ṽ_{n(j)} = D_{n(j)}^{-1} V_{n(j)}.
+
+        Args:
+            knn_idx: (M', K_neigh) neighbor indices into full M
+            idx: (M',) indices of minibatch points into full M
+
+        Returns:
+            tau_tilde_sq: (..., M') conditional variances
+            alpha: (..., M', K_neigh) regression coefficients
+        """
+        V_full = self.V.data   # (M, R) or (L, M, R)
+        D_full = self.D        # (M,) or (L, M)
+        R = self.rank
+
+        if idx is None:
+            M = V_full.shape[-2]
+            idx = torch.arange(M, device=V_full.device)
+
+        M_prime = idx.shape[0]
+        K_neigh = knn_idx.shape[-1]
+
+        # Gather V and D for j and neighbors
+        if self.batch_size is None:
+            V_j = V_full[idx]              # (M', R)
+            d_j = D_full[idx]              # (M',)
+            V_neighbors = V_full[knn_idx]  # (M', K_neigh, R)
+            D_neighbors = D_full[knn_idx]  # (M', K_neigh)
+        else:
+            V_j = V_full[:, idx]              # (L, M', R)
+            d_j = D_full[:, idx]              # (L, M')
+            V_neighbors = V_full[:, knn_idx]  # (L, M', K_neigh, R)
+            D_neighbors = D_full[:, knn_idx]  # (L, M', K_neigh)
+
+        D_inv_neighbors = 1.0 / D_neighbors  # (..., M', K_neigh)
+
+        # Ṽ_{n(j)} = D_{n(j)}^{-1} V_{n(j)}, shape (..., M', K_neigh, R)
+        V_tilde = V_neighbors * D_inv_neighbors.unsqueeze(-1)
+
+        # A_{n(j)} = V_{n(j)}^T D_{n(j)}^{-1} V_{n(j)} = V_tilde^T V_neighbors
+        # V_tilde: (..., M', K_neigh, R), V_neighbors: (..., M', K_neigh, R)
+        # A: (..., M', R, R)
+        A = V_tilde.transpose(-2, -1) @ V_neighbors  # (..., M', R, R)
+
+        # Ψ_{n(j)} = I_R + A_{n(j)}, shape (..., M', R, R)
+        eye = torch.eye(R, device=V_full.device, dtype=V_full.dtype)
+        Psi_local = eye + A  # broadcasts over batch dims
+
+        # Cholesky of Ψ_{n(j)} for stable solve
+        L_psi = torch.linalg.cholesky(Psi_local)  # (..., M', R, R)
+
+        # --- τ̃_j² = d_j + V_j (I_R - A Ψ^{-1}) V_j^T ---
+        # Compute A Ψ^{-1} via solving: Ψ^T X^T = A^T => X = (Ψ^{-T} A^T)^T = A Ψ^{-1}
+        # But since Ψ is symmetric: A Ψ^{-1} = solve(Ψ, A^T)^T
+        # Using cholesky: solve L L^T X = A^T
+        A_Psi_inv = torch.linalg.solve(Psi_local, A.transpose(-2, -1)).transpose(-2, -1)
+        # (..., M', R, R)
+
+        # (I - A Ψ^{-1}) V_j^T
+        # V_j: (..., M', R) -> (..., M', R, 1)
+        V_j_col = V_j.unsqueeze(-1)  # (..., M', R, 1)
+
+        # (..., M', R, R) @ (..., M', R, 1) -> (..., M', R, 1)
+        correction = A_Psi_inv @ V_j_col  # (..., M', R, 1)
+
+        # V_j (I - A Ψ^{-1}) V_j^T = V_j V_j^T - V_j A Ψ^{-1} V_j^T
+        # = ||V_j||² - V_j^T @ correction
+        V_j_norm_sq = (V_j ** 2).sum(dim=-1)  # (..., M')
+        V_j_correction = (V_j_col.transpose(-2, -1) @ correction).squeeze(-1).squeeze(-1)
+        # (..., M', 1, 1) -> (..., M')
+
+        tau_tilde_sq = d_j + V_j_norm_sq - V_j_correction  # (..., M')
+
+        # --- α_j^T = V_j V_{n(j)}^T S_{n(j)n(j)}^{-1} ---
+        # Using: S_{n(j)n(j)}^{-1} = D_{n(j)}^{-1} - D_{n(j)}^{-1} V_{n(j)} Ψ_{n(j)}^{-1} V_{n(j)}^T D_{n(j)}^{-1}
+        #                            = D_inv_n - V_tilde Ψ^{-1} V_tilde^T
+        #
+        # α_j^T = V_j V_{n(j)}^T [D_inv_n - V_tilde Ψ^{-1} V_tilde^T]
+        #        = V_j [V_tilde^T - V_{n(j)}^T V_tilde Ψ^{-1} V_tilde^T]^T  ... but simpler:
+        #
+        # α_j^T = V_j V_{n(j)}^T D_inv_n - V_j V_{n(j)}^T V_tilde Ψ^{-1} V_tilde^T
+        #
+        # Term 1: V_j V_{n(j)}^T D_inv_n = V_j Ṽ_{n(j)}^T ... but that gives (R,) @ (R, K) = (K,)
+        # Wait, let me be more careful with shapes.
+
+        # V_j: (..., M', R)
+        # V_tilde: (..., M', K_neigh, R)  [= D_inv * V_neighbors]
+
+        # Term 1: V_j @ V_tilde^T -> (..., M', R) @ (..., M', R, K_neigh) = (..., M', K_neigh)
+        # But we need V_j as row: (..., M', 1, R) @ (..., M', R, K_neigh) -> (..., M', 1, K_neigh)
+        term1 = (V_j.unsqueeze(-2) @ V_tilde.transpose(-2, -1)).squeeze(-2)  # (..., M', K_neigh)
+
+        # Term 2: V_j @ A_{n(j)} @ Ψ^{-1} @ V_tilde^T
+        # V_j A = V_j @ (V_tilde^T @ V_neighbors) ... but we already have A
+        # V_j: (..., M', 1, R), A: (..., M', R, R) -> V_j A: (..., M', 1, R)
+        V_j_A = (V_j.unsqueeze(-2) @ A).squeeze(-2)  # (..., M', R)
+
+        # Ψ^{-1} V_tilde^T: solve Ψ x = V_tilde^T
+        # V_tilde^T: (..., M', R, K_neigh)
+        # Psi_local: (..., M', R, R)
+        Psi_inv_Vt = torch.linalg.solve(Psi_local, V_tilde.transpose(-2, -1))  # (..., M', R, K_neigh)
+
+        # V_j @ Ψ^{-1} V_tilde^T: (..., M', 1, R) @ (..., M', R, K_neigh) -> (..., M', 1, K_neigh)
+        term2 = (V_j.unsqueeze(-2) @ Psi_inv_Vt).squeeze(-2)  # (..., M', K_neigh)
+
+        alpha = term1 - term2  # (..., M', K_neigh)
+
+        return tau_tilde_sq, alpha

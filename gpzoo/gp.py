@@ -910,9 +910,14 @@ class LCGP(SVGP):
         is_batched = mu.dim() == 2
         
         # Get τ̃_j² and α_j
-        D_inv, Psi_chol = self.Lu.get_precision_components()
-        tau_tilde_sq, alpha = self.Lu.get_conditional_params(
-            knn_idx=knn_idx, D_inv=D_inv, Psi_cholesky=Psi_chol, idx=idx_tensor
+        # D_inv, Psi_chol = self.Lu.get_precision_components()
+        # tau_tilde_sq, alpha = self.Lu.get_conditional_params(
+        #     knn_idx=knn_idx, D_inv=D_inv, Psi_cholesky=Psi_chol, idx=idx_tensor
+        # )
+
+    
+        tau_tilde_sq, alpha = self.Lu.get_conditional_params_exact(
+            knn_idx=knn_idx, idx=idx_tensor
         )
         
         # Get S_{n(j)n(j)} and means
