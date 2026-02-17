@@ -652,8 +652,8 @@ class LowRankPlusDiagonal(nn.Module):
         # --- τ̃_j² = d_j + V_j (I_R - A Ψ^{-1}) V_j^T ---
         # Compute A Ψ^{-1} via solving: Ψ^T X^T = A^T => X = (Ψ^{-T} A^T)^T = A Ψ^{-1}
         # But since Ψ is symmetric: A Ψ^{-1} = solve(Ψ, A^T)^T
-        # Using cholesky: solve L L^T X = A^T
-        A_Psi_inv = torch.linalg.solve(Psi_local, A.transpose(-2, -1)).transpose(-2, -1)
+        # Using cholesky_solve: L L^T X = A^T
+        A_Psi_inv = torch.cholesky_solve(A.transpose(-2, -1), L_psi).transpose(-2, -1)
         # (..., M', R, R)
 
         # (I - A Ψ^{-1}) V_j^T
@@ -695,13 +695,13 @@ class LowRankPlusDiagonal(nn.Module):
         # V_j: (..., M', 1, R), A: (..., M', R, R) -> V_j A: (..., M', 1, R)
         V_j_A = (V_j.unsqueeze(-2) @ A).squeeze(-2)  # (..., M', R)
 
-        # Ψ^{-1} V_tilde^T: solve Ψ x = V_tilde^T
+        # Ψ^{-1} V_tilde^T: cholesky_solve L L^T x = V_tilde^T
         # V_tilde^T: (..., M', R, K_neigh)
-        # Psi_local: (..., M', R, R)
-        Psi_inv_Vt = torch.linalg.solve(Psi_local, V_tilde.transpose(-2, -1))  # (..., M', R, K_neigh)
+        # L_psi: (..., M', R, R)
+        Psi_inv_Vt = torch.cholesky_solve(V_tilde.transpose(-2, -1), L_psi)  # (..., M', R, K_neigh)
 
-        # V_j @ Ψ^{-1} V_tilde^T: (..., M', 1, R) @ (..., M', R, K_neigh) -> (..., M', 1, K_neigh)
-        term2 = (V_j.unsqueeze(-2) @ Psi_inv_Vt).squeeze(-2)  # (..., M', K_neigh)
+        # V_j_A @ Ψ^{-1} V_tilde^T: (..., M', 1, R) @ (..., M', R, K_neigh) -> (..., M', 1, K_neigh)
+        term2 = (V_j_A.unsqueeze(-2) @ Psi_inv_Vt).squeeze(-2)  # (..., M', K_neigh)
 
         alpha = term1 - term2  # (..., M', K_neigh)
 

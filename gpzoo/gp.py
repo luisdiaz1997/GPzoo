@@ -940,7 +940,9 @@ class LCGP(SVGP):
         alpha_exp = alpha.unsqueeze(-2)
         
         beta_S_beta = (beta_exp @ S_nn @ beta_exp.transpose(-2, -1)).squeeze(-1).squeeze(-1)
+
         alpha_S_alpha = (alpha_exp @ S_nn @ alpha_exp.transpose(-2, -1)).squeeze(-1).squeeze(-1)
+        
         alpha_S_beta = (alpha_exp @ S_nn @ beta_exp.transpose(-2, -1)).squeeze(-1).squeeze(-1)
         
         # KL (unsimplified form)
