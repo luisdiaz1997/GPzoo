@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpzoo"
+version = "0.1.0"
+description = "Gaussian Process models for spatial transcriptomics"
+readme = "README.md"
+requires-python = ">=3.14"
+license = {text = "GPL-2.0-only"}
+authors = [
+    {name = "Luis Chumpitaz Diaz", email = "luis.chumpitazdiaz@gladstone.ucsf.edu"},
+]
+keywords = ["gaussian-processes", "spatial-transcriptomics", "variational-inference", "pytorch", "single-cell"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "torch>=1.9.0",
+    "numpy>=1.19.0",
+    "scikit-learn>=1.0.0",
+    "tqdm>=4.0.0",
+    "faiss-cpu>=1.7.0",
+    "matplotlib>=3.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=2.0",
+    "black>=21.0",
+    "isort>=5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/luisdiaz1997/GPzoo"
+Repository = "https://github.com/luisdiaz1997/GPzoo"
+Issues = "https://github.com/luisdiaz1997/GPzoo/issues"
+
+[tool.setuptools]
+packages = ["gpzoo"]
+
+[tool.setuptools.package-data]
+gpzoo = ["*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v"
