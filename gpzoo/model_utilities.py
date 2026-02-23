@@ -282,72 +282,76 @@ def mggp_kmeans_inducing_points(
         missing_groups = set(unique_groups) - set(derived_groups)
 
         if missing_groups:
-            # Fall back to proportional allocation for missing groups
             warnings.warn(
                 f"allocation='derived' failed to assign inducing points to groups "
-                f"{sorted(missing_groups)}. Falling back to 'proportional' allocation "
-                f"for these groups.",
+                f"{sorted(missing_groups)}. Sampling donor points to fill missing groups.",
                 UserWarning
             )
 
-            # Calculate how many points needed for missing groups (proportional)
-            missing_counts = group_counts[np.isin(unique_groups, list(missing_groups))]
-            missing_total = missing_counts.sum()
-            n_missing = len(missing_groups)
-            n_needed = min(
-                int(missing_total / total_available * total_points),
-                total_points // n_missing
-            )
-            n_needed = max(n_needed, 1)  # At least 1 per missing group
+            rng = np.random.default_rng(seed)
 
-            # Generate K-means for missing groups
-            fallback_centers_list = []
-            fallback_group_list = []
-            for g in missing_groups:
-                g_idx = np.where(unique_groups == g)[0][0]
-                mask = groups_np == g
-                count = mask.sum()
-                n_clusters = min(n_needed, count)
+            # Mutable work lists; positions here are stable indices (we never reorder).
+            # Positions 0..M-1 come from Z_derived; later positions are appended fallbacks.
+            Z_work = list(Z_derived)
+            G_work = list(groupsZ_derived.tolist())
 
-                if n_clusters > 0:
-                    kmeans_fb = KMeans(n_clusters=n_clusters, random_state=seed, n_init=n_init)
-                    kmeans_fb.fit(X_np[mask])
-                    fallback_centers_list.append(kmeans_fb.cluster_centers_)
-                    fallback_group_list.append(np.full(n_clusters, g, dtype=np.int64))
+            # group_to_pos[g] = set of currently-active positions for group g
+            group_to_pos = {}
+            for pos, g in enumerate(G_work):
+                group_to_pos.setdefault(int(g), set()).add(pos)
 
-            # Remove some derived points to make room for fallback points
-            n_replace = sum(len(g) for g in fallback_group_list)
-            if n_replace > 0:
-                # Remove points from groups that have excess (more than proportional share)
-                derived_group_counts = np.bincount(groupsZ_derived, minlength=len(unique_groups))
-                target_per_group = (total_points - n_replace) * group_counts / total_available
-                excess_mask = derived_group_counts > target_per_group
+            removed_pos = set()  # positions to exclude when reconstructing
 
-                remove_indices = []
-                for g_idx in np.where(excess_mask)[0]:
-                    g = unique_groups[g_idx]
-                    n_remove = int(derived_group_counts[g_idx] - target_per_group[g_idx])
-                    if n_remove > 0:
-                        g_indices = np.where(groupsZ_derived == g)[0]
-                        remove_indices.extend(g_indices[:n_remove])
+            # donor_threshold: a donor group must have strictly more than this many
+            # active points.  Start at 1 so donors always keep ≥ 1 point after giving.
+            donor_threshold = 1
 
-                # Remove excess derived points
-                if remove_indices:
-                    keep_mask = np.ones(len(Z_derived), dtype=bool)
-                    keep_mask[remove_indices] = False
-                    Z_derived = Z_derived[keep_mask]
-                    groupsZ_derived = groupsZ_derived[keep_mask]
+            for missing_g in sorted(missing_groups):
+                # Lower threshold until we can find at least one donor.
+                t = donor_threshold
+                while t >= 0:
+                    donors = [
+                        g for g, pos_set in group_to_pos.items()
+                        if len(pos_set) > t
+                    ]
+                    if donors:
+                        break
+                    t -= 1
 
-                # Concatenate fallback points
-                if fallback_centers_list:
-                    Z_derived = np.concatenate([
-                        Z_derived,
-                        np.concatenate(fallback_centers_list, axis=0)
-                    ], axis=0)
-                    groupsZ_derived = np.concatenate([
-                        groupsZ_derived,
-                        np.concatenate(fallback_group_list, axis=0)
-                    ], axis=0)
+                if not donors:
+                    warnings.warn(
+                        f"No donors available for group {missing_g}; "
+                        f"it will have no inducing points.",
+                        UserWarning
+                    )
+                    continue
+
+                n_donors = len(donors)
+
+                # Remove 1 point from each donor group (random choice).
+                for donor_g in donors:
+                    avail = list(group_to_pos[donor_g])
+                    pick = int(rng.integers(len(avail)))
+                    pos = avail[pick]
+                    removed_pos.add(pos)
+                    group_to_pos[donor_g].discard(pos)
+
+                # Sample n_donors data points from the missing group and append.
+                X_mg = X_np[groups_np == missing_g]
+                new_pts = X_mg[
+                    rng.choice(len(X_mg), size=n_donors, replace=(n_donors > len(X_mg)))
+                ]
+                start = len(Z_work)
+                Z_work.extend(new_pts)
+                G_work.extend([missing_g] * n_donors)
+                group_to_pos.setdefault(missing_g, set()).update(
+                    range(start, start + n_donors)
+                )
+
+            # Reconstruct: keep every position not in removed_pos.
+            keep = [i for i in range(len(Z_work)) if i not in removed_pos]
+            Z_derived = np.array([Z_work[i] for i in keep])
+            groupsZ_derived = np.array([G_work[i] for i in keep], dtype=groupsZ_derived.dtype)
 
         return (
             torch.tensor(Z_derived, dtype=X.dtype, device=X.device),
