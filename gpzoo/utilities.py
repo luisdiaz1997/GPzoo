@@ -13,6 +13,52 @@ import gc
 
 
 
+def estimate_lcgp_rank(lengthscale, domain_range, dim=2, p=0.9, j_max=1000):
+    """Estimate the effective spectral rank of a Matérn 3/2 kernel.
+
+    Returns the minimum number of Fourier modes needed to capture fraction p
+    of the kernel's variance, based on the Matérn 3/2 power spectral density
+    evaluated on a Fourier grid over the domain.
+
+    Args:
+        lengthscale: Kernel lengthscale l.
+        domain_range: Tuple (min, max) defining the domain; L = max - min.
+        dim: Spatial dimension (1 or 2). Default 2.
+        p: Variance threshold (default 0.99).
+        j_max: Maximum number of Fourier modes per axis (default 1000).
+
+    Returns:
+        Integer R, the estimated effective rank.
+    """
+    L = domain_range[1] - domain_range[0]
+    l = lengthscale
+
+    if dim == 1:
+        js = np.arange(0, j_max + 1)
+        freqs = np.pi * js / L
+        # Matérn 3/2 spectral density: exponent is 2 (nu=3/2 → (nu + d/2) = 2)
+        lambdas = (3.0 / l**2 + freqs**2) ** (-2)
+        total = lambdas.sum()
+        cumsum = np.cumsum(lambdas)
+        R = int(np.searchsorted(cumsum, p * total)) + 1
+    elif dim == 2:
+        js = np.arange(0, j_max + 1)
+        freqs = np.pi * js / L
+        # 2D grid of eigenvalues: exponent is 3 (nu=3/2 → (nu + d/2) = 3)
+        f1, f2 = np.meshgrid(freqs, freqs, indexing='ij')
+        lambdas = (3.0 / l**2 + f1**2 + f2**2) ** (-3)
+        flat = lambdas.ravel()
+        total = flat.sum()
+        # Sort descending to find minimum k largest modes covering fraction p
+        flat_sorted = np.sort(flat)[::-1]
+        cumsum = np.cumsum(flat_sorted)
+        R = int(np.searchsorted(cumsum, p * total)) + 1
+    else:
+        raise ValueError(f"dim must be 1 or 2, got {dim}")
+
+    return R
+
+
 def init_Lu_nsf(kernel, X, Z, K, niter=100, use_cholesky=False, jitter=1e-5):
     """Initialize Lu using SVD or Cholesky decomposition.
 
