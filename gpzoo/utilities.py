@@ -24,7 +24,7 @@ def estimate_lcgp_rank(lengthscale, domain_range, dim=2, p=0.9, j_max=1000):
         lengthscale: Kernel lengthscale l.
         domain_range: Tuple (min, max) defining the domain; L = max - min.
         dim: Spatial dimension (1 or 2). Default 2.
-        p: Variance threshold (default 0.99).
+        p: Variance threshold (default 0.9).
         j_max: Maximum number of Fourier modes per axis (default 1000).
 
     Returns:
@@ -44,9 +44,9 @@ def estimate_lcgp_rank(lengthscale, domain_range, dim=2, p=0.9, j_max=1000):
     elif dim == 2:
         js = np.arange(0, j_max + 1)
         freqs = np.pi * js / L
-        # 2D grid of eigenvalues: exponent is 3 (nu=3/2 → (nu + d/2) = 3)
+        # 2D grid of eigenvalues: exponent is 5/2 (nu=3/2 → (nu + d/2) = 5/2)
         f1, f2 = np.meshgrid(freqs, freqs, indexing='ij')
-        lambdas = (3.0 / l**2 + f1**2 + f2**2) ** (-3)
+        lambdas = (3.0 / l**2 + f1**2 + f2**2) ** (-2.5)
         flat = lambdas.ravel()
         total = flat.sum()
         # Sort descending to find minimum k largest modes covering fraction p
