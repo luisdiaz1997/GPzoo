@@ -162,11 +162,12 @@ def extract_factors(model, X, groupsX=None, n_groups=1):
     model.eval()
     model.prior.K = 50
 
-    knn_idx = model.prior.calculate_knn(X)[:, :-1]
+    from gpzoo.knn_utilities import calculate_knn
+    knn_idx = calculate_knn(model.prior, X, strategy="knn")[:, :-1]
     model.prior.knn_idx = knn_idx
 
     if hasattr(model.prior, 'Z'):
-        knn_idz = model.prior.calculate_knn(model.prior.Z)[:, 1:]
+        knn_idz = calculate_knn(model.prior, model.prior.Z, strategy="knn")[:, 1:]
         model.prior.knn_idz = knn_idz
 
     with torch.no_grad():
@@ -195,7 +196,8 @@ def get_groupwise_factors(model, X, groupsX, n_groups, L=12):
     results = []
 
     with torch.no_grad():
-        knn_idx = model.prior.calculate_knn(X)
+        from gpzoo.knn_utilities import calculate_knn
+        knn_idx = calculate_knn(model.prior, X, strategy="knn")
         model.prior.knn_idx = knn_idx[:, :-1]
 
         for group_index in tqdm(range(n_groups), desc="Computing group-wise factors"):

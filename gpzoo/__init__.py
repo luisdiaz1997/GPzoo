@@ -28,6 +28,7 @@ from .models import (
     MGGP_VNNGP_NSF,
     build_model,
 )
+from .knn_utilities import calculate_knn
 
 __version__ = "0.1.0"
 
@@ -37,4 +38,5 @@ __all__ = [
     "MGGP_SVGP_NSF",
     "MGGP_VNNGP_NSF",
     "build_model",
+    "calculate_knn",
 ]

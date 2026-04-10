@@ -4,7 +4,6 @@ from torch.distributions import constraints, transform_to
 import torch.nn as nn
 from .utilities import add_jitter, svgp_forward, reshape_param, whitened_KL, is_lower_triangular
 from .modules import CholeskyParameter
-import faiss
 
 
 
@@ -533,19 +532,6 @@ class VNNGP(SVGP):
 
         return mu, Lu
 
-    def calculate_knn(self, X):
-
-        """Calculate the K+1 nearest neighbors of X in Z using FAISS."""
-
-        X_np = X.detach().cpu().float().numpy()
-        Z = self.Z.detach().cpu().float().numpy()
-        index = faiss.IndexFlatL2(Z.shape[-1])
-        index.add(Z)
-        distances, indices = index.search(X_np, self.K+1)
-
-        return torch.tensor(indices, dtype=torch.long, device='cpu')
-
-
     def reshape_input_data(self, **kwargs):
         """
         Ensure each input is 2D: (N, D) or (N, 1)
@@ -768,15 +754,6 @@ class LCGP(SVGP):
         # Override Lu with a raw nn.Parameter (same as VNNGP)
         del self.Lu
         self.Lu = nn.Parameter(torch.randn((M, K)))
-
-    def calculate_knn(self, X):
-        """Calculate the K+1 nearest neighbors of X in Z using FAISS."""
-        X_np = X.detach().cpu().float().numpy()
-        Z = self.Z.detach().cpu().float().numpy()
-        index = faiss.IndexFlatL2(Z.shape[-1])
-        index.add(Z)
-        distances, indices = index.search(X_np, self.K + 1)
-        return torch.tensor(indices, dtype=torch.long, device='cpu')
 
     def reshape_input_data(self, **kwargs):
         """Same as VNNGP - reshape for local kernel computation."""

@@ -8,6 +8,8 @@ from torch.distributions import Poisson
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 
+from .knn_utilities import calculate_knn
+
 
 def create_sequential_lr_scheduler(
     optimizer: torch.optim.Optimizer,
@@ -296,7 +298,7 @@ def train_vnngp_batched_with_tracking(
     scale_unfrozen = len(scale_params_list) == 0  # True if no scale params to manage
     scale_target_lr = scale_lr if scale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
 
-    full_knn_idx = model.prior.calculate_knn(X).clone()[:, :-1]
+    full_knn_idx = calculate_knn(model.prior, X, strategy="knn").clone()[:, :-1]
 
     for it in trange(start_step, start_step + steps, desc=progress_desc):
         if lengthscale_unfreeze_step is not None and not ls_added and it >= lengthscale_unfreeze_step:
@@ -562,7 +564,7 @@ def train_mggp_vnngp_with_tracking(
     scale_unfrozen = len(scale_params_list) == 0  # True if no scale params to manage
     scale_target_lr = scale_lr if scale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
 
-    full_knn_idx = model.prior.calculate_knn(X).clone()[:, :-1]
+    full_knn_idx = calculate_knn(model.prior, X, strategy="knn").clone()[:, :-1]
 
     for it in trange(start_step, start_step + steps, desc=progress_desc):
         if lengthscale_unfreeze_step is not None and not ls_added and it >= lengthscale_unfreeze_step:
@@ -707,7 +709,7 @@ def train_lcgp_batched_with_tracking(
     scale_target_lr = scale_lr if scale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
 
     # Precompute KNN indices for all points
-    full_knn_idx = model.prior.calculate_knn(X).clone()[:, :-1]
+    full_knn_idx = calculate_knn(model.prior, X, strategy="knn").clone()[:, :-1]
 
     for it in trange(start_step, start_step + steps, desc=progress_desc):
         if lengthscale_unfreeze_step is not None and not ls_added and it >= lengthscale_unfreeze_step:
@@ -978,7 +980,7 @@ def train_mggp_lcgp_with_tracking(
     scale_unfrozen = len(scale_params_list) == 0  # True if no scale params to manage
     scale_target_lr = scale_lr if scale_lr is not None else optimizer.param_groups[0].get("lr", 1e-3)
 
-    full_knn_idx = model.prior.calculate_knn(X).clone()[:, :-1]
+    full_knn_idx = calculate_knn(model.prior, X, strategy="knn").clone()[:, :-1]
 
     for it in trange(start_step, start_step + steps, desc=progress_desc):
         if lengthscale_unfreeze_step is not None and not ls_added and it >= lengthscale_unfreeze_step:

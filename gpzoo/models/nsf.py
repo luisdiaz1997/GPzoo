@@ -242,9 +242,10 @@ class NSF_Model(nn.Module, ABC):
     
     def _setup_knn(self, X: torch.Tensor):
         """Precompute KNN indices for VNNGP models."""
-        knn_idx = self._model.prior.calculate_knn(X)[:, :-1]
+        from ..knn_utilities import calculate_knn
+        knn_idx = calculate_knn(self._model.prior, X, strategy="knn")[:, :-1]
         self._model.prior.knn_idx = knn_idx
-        knn_idz = self._model.prior.calculate_knn(self._model.prior.Z)[:, 1:]
+        knn_idz = calculate_knn(self._model.prior, self._model.prior.Z, strategy="knn")[:, 1:]
         self._model.prior.knn_idz = knn_idz
 
 

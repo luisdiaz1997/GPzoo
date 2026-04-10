@@ -217,7 +217,8 @@ def train_vnngp_batched_with_tracking(optimizer, model, X, groupsX, y, device, s
     N = len(X)
     J = len(y)
 
-    full_knn_idx = model.prior.calculate_knn(X).clone()
+    from .knn_utilities import calculate_knn
+    full_knn_idx = calculate_knn(model.prior, X, strategy="knn").clone()
 
     for it in tqdm(range(steps)):
 
