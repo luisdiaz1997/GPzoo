@@ -43,13 +43,22 @@ def _probabilistic_knn(
     multigroup: bool = False,
     groupsX: torch.Tensor | None = None,
     groupsZ: torch.Tensor | None = None,
+    mem_gb: float = 50.0,
 ) -> torch.Tensor:
     """Sample K neighbors per row weighted by kernel(X, Z), prepend self.
 
     Returns ``(N, K+1)`` long tensor with column 0 = self index.
+
+    For large N (e.g. LCGP where M=N), the full (N, M) kernel matrix can
+    exceed GPU/CPU memory. ``mem_gb`` sets a budget; rows are processed in
+    chunks of size ``B = floor(mem_gb * 2.5e8 / M)`` so peak memory stays
+    within budget.
     """
+    import math
+
     N = X.shape[0]
-    K = min(K, Z.shape[0] - 1)
+    M = Z.shape[0]
+    K = min(K, M - 1)
 
     # Run on CPU: kernel params and inputs may be on different devices at
     # construction time (kernel is created on CPU, inputs may already be on GPU).
@@ -62,24 +71,40 @@ def _probabilistic_knn(
     kernel_was = next(kernel.parameters()).device
     kernel.cpu()
 
-    with torch.no_grad():
-        if multigroup:
-            weights = kernel(X, Z, groupsX, groupsZ)
-        else:
-            weights = kernel(X, Z)
+    # Determine chunk size based on memory budget.
+    B = int(math.floor(mem_gb * 2.5e8 / M))
+    B = max(1, min(B, N))
+
+    def _process_chunk(x_chunk, start, end):
+        gX = groupsX[start:end] if groupsX is not None else None
+        with torch.no_grad():
+            if multigroup:
+                w = kernel(x_chunk, Z, gX, groupsZ)
+            else:
+                w = kernel(x_chunk, Z)
+        w = w.squeeze()  # (chunk_size, M)
+        if w.dim() == 1:
+            w = w.unsqueeze(0)
+        # Zero out self-connections when X == Z (training time)
+        if N == M:
+            rows = torch.arange(end - start)
+            cols = torch.arange(start, end)
+            w[rows, cols] = 0.0
+        w = w / w.sum(dim=1, keepdim=True).clamp(min=1e-12)
+        return _sample_without_replacement(w, K)  # (chunk_size, K)
+
+    if B >= N:
+        # Single-shot path — no chunking overhead for small datasets.
+        sampled = _process_chunk(X, 0, N)
+    else:
+        chunks = []
+        for start in range(0, N, B):
+            end = min(start + B, N)
+            chunks.append(_process_chunk(X[start:end], start, end))
+        sampled = torch.cat(chunks, dim=0)  # (N, K)
 
     kernel.to(kernel_was)
 
-    weights = weights.squeeze()  # ensure (N, M)
-
-    # Zero out self when querying training points (X is Z)
-    if N == Z.shape[0]:
-        weights[torch.arange(N), torch.arange(N)] = 0.0
-
-    row_sums = weights.sum(dim=1, keepdim=True).clamp(min=1e-12)
-    weights = weights / row_sums
-
-    sampled = _sample_without_replacement(weights, K)  # (N, K)
     self_idx = torch.arange(N, device=sampled.device).unsqueeze(1)
     return torch.cat([self_idx, sampled], dim=1).to(torch.long).cpu()
 
@@ -91,6 +116,7 @@ def calculate_knn(
     multigroup: bool = False,
     groupsX: torch.Tensor | None = None,
     groupsZ: torch.Tensor | None = None,
+    mem_gb: float = 50.0,
 ) -> torch.Tensor:
     """Compute KNN indices for a local-GP prior model.
 
@@ -100,6 +126,10 @@ def calculate_knn(
     Returns ``(N, K+1)`` with column 0 = self for both strategies. Callers
     slice ``[:, :-1]`` (self-inclusive) for the inference path and
     ``[:, 1:]`` (self-exclusive) for the KL path.
+
+    ``mem_gb`` controls the memory budget for the probabilistic path (default
+    50 GB). The kernel matrix is evaluated in row-chunks so peak memory stays
+    within budget. Has no effect on the FAISS path.
     """
     Z = model.Z
     K = model.K
@@ -107,6 +137,8 @@ def calculate_knn(
     if strategy == "knn":
         return _faiss_knn(X, Z, K)
     elif strategy == "probabilistic":
-        return _probabilistic_knn(X, Z, K, model.kernel, multigroup, groupsX, groupsZ)
+        return _probabilistic_knn(
+            X, Z, K, model.kernel, multigroup, groupsX, groupsZ, mem_gb=mem_gb
+        )
     else:
         raise ValueError(f"Unknown strategy: {strategy!r}. Use 'knn' or 'probabilistic'.")
