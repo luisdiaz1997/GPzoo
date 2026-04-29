@@ -21,7 +21,11 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "torch>=1.9.0",
+    # torch capped below 2.11 — PyPI default for 2.11 ships +cu130 wheels, which
+    # require an NVIDIA driver supporting CUDA 13. Lab cluster drivers max out at
+    # CUDA 12.8 (driver 570.x), and 2.10.x default is +cu128. Lift this cap once
+    # the cluster driver supports CUDA 13.
+    "torch>=1.9.0,<2.11",
     "numpy>=1.19.0",
     "scikit-learn>=1.0.0",
     "tqdm>=4.0.0",
