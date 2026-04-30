@@ -42,7 +42,7 @@ class BaseVGP(nn.Module):
         Kxx, Kzx, Kzz = covariances
         kzz = add_jitter(Kzz, self.jitter)  # Add jitter to Kzz for numerical stability
 
-        return mu, Lu, Kxx, Kzx, Kzz
+        return mu, Lu, Kxx, Kzx, kzz
 
 
     def transform_variables(self, mu, Lu, L, verbose=False):
