@@ -170,6 +170,62 @@ class batched_MGGP_Matern32(batched_Matern32):
     return torch.transpose(result, -1, 0)
   
 
+class batched_Matern52(BaseKernel):
+  def __init__(self, sigma=1.0, lengthscale=2.0):
+    super().__init__()
+    self.sigma = nn.Parameter(torch.tensor(sigma))
+    self.lengthscale = nn.Parameter(torch.tensor(lengthscale))
+
+  def covariance(self, x1, x2, return_distance=False):
+    diff = x1 - x2
+    dist = _torch_sqrt((diff**2).sum())
+    val = (5**0.5) * dist / self.lengthscale
+    return (self.sigma**2) * (1 + val + val**2 / 3) * torch.exp(-val)
+
+  def forward(self, X, Z, diag=False, return_distance=False):
+    if diag:
+      return (self.sigma**2).reshape(-1, 1).expand(len(self.sigma) if isinstance(self.sigma, torch.Tensor) and self.sigma.dim() > 0 else 1, len(X))
+    result = torch.vmap(lambda x: torch.vmap(lambda y: self.covariance(x, y))(X))(Z)
+    return torch.transpose(result, -1, 0)
+
+
+class batched_MGGP_Matern52(batched_Matern52):
+  def __init__(self, sigma=1.0, lengthscale=1.0, group_diff_param=1.0, n_groups=10):
+    super().__init__(sigma, lengthscale)
+    self.group_diff_param = nn.Parameter(torch.tensor(group_diff_param))
+    group_distances = torch.ones(n_groups) - torch.eye(n_groups)
+    self.embedding = nn.Parameter(_embed_distance_matrix(group_distances), requires_grad=False)
+
+  def set_group_distances(self, group_distances):
+    self.embedding = nn.Parameter(_embed_distance_matrix(group_distances), requires_grad=False)
+
+  def covariance(self, x1, x2, group_embedding1, group_embedding2, return_distance=False):
+    diff = x1 - x2
+    dist = _torch_sqrt((diff**2).sum())
+    dist_scaled = dist / torch.abs(self.lengthscale)
+    p = x1.unsqueeze(0).shape[-1]
+    group_dist = torch.sum((group_embedding1 - group_embedding2) ** 2)
+    val = 1 / (torch.abs(self.group_diff_param) * group_dist + 1)
+    val2 = (5**0.5) * dist_scaled * (val**0.5)
+    cov = (self.sigma**2) * (1 + val2 + val2**2 / 3) * torch.exp(-val2) * (val**((5 + p) / 2))
+    if return_distance:
+      return cov, dist
+    return cov
+
+  def forward(self, X, Z, groupsX, groupsZ, diag=False, return_distance=False):
+    if diag:
+      return (self.sigma**2).reshape(-1, 1).expand(len(self.sigma) if isinstance(self.sigma, torch.Tensor) and self.sigma.dim() > 0 else 1, len(X))
+    group_embeddingsX = self.embedding[groupsX]
+    group_embeddingsZ = self.embedding[groupsZ]
+    if return_distance:
+      result = torch.vmap(lambda x, gx: torch.vmap(lambda y, gy: self.covariance(x, y, gx, gy, return_distance=True))(X, group_embeddingsX))(Z, group_embeddingsZ)
+      distances = result[1]
+      result = result[0]
+      return torch.transpose(result, -1, 0), torch.transpose(distances, -1, 0)
+    result = torch.vmap(lambda x, gx: torch.vmap(lambda y, gy: self.covariance(x, y, gx, gy))(X, group_embeddingsX))(Z, group_embeddingsZ)
+    return torch.transpose(result, -1, 0)
+
+
 class batched_Brownian(BaseKernel):
     def __init__(self, sigma=1.0):
         super().__init__()
