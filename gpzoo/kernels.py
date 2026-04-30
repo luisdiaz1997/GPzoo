@@ -37,7 +37,7 @@ class batched_Matern32(BaseKernel):
   def covariance(self, x1, x2, return_distance=False):
 
     diff = x1-x2
-    dist = torch.sqrt((diff**2).sum())
+    dist = _torch_sqrt((diff**2).sum())
 
     val = (3**0.5)*dist/self.lengthscale
     return (self.sigma**2)*(1+val)*torch.exp(-val)
@@ -71,7 +71,7 @@ class batched_separate_MGGP_Matern32(batched_Matern32):
   def covariance(self, x1, x2, group_embedding1, group_embedding2, return_distance=False):
 
     diff = x1-x2
-    dist = torch.sqrt((diff**2).sum())
+    dist = _torch_sqrt((diff**2).sum())
 
     dist_scaled = dist/torch.abs(self.lengthscale)
 
@@ -129,7 +129,7 @@ class batched_MGGP_Matern32(batched_Matern32):
   def covariance(self, x1, x2, group_embedding1, group_embedding2, return_distance=False):
 
     diff = x1-x2
-    dist = torch.sqrt((diff**2).sum())
+    dist = _torch_sqrt((diff**2).sum())
 
     dist_scaled = dist/torch.abs(self.lengthscale)
 
